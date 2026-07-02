@@ -30,6 +30,32 @@ def ensure_torchrun_env() -> None:
     os.environ.setdefault("MASTER_PORT", "29500")
 
 
+
+def _checkpoint_path(path: str | None) -> Path | None:
+    return Path(path).expanduser() if path else None
+
+
+def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer, step: int, save_optimizer: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "step": step,
+        "model": model.state_dict(),
+    }
+    if save_optimizer:
+        payload["optimizer"] = optimizer.state_dict()
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(path)
+
+
+def _load_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None, device: torch.device) -> int:
+    checkpoint = torch.load(path, map_location=device)
+    model.load_state_dict(checkpoint["model"])
+    if optimizer is not None and "optimizer" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    return int(checkpoint.get("step", 0))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-file", type=Path, required=True)
@@ -98,6 +124,11 @@ def main() -> None:
         fused=cfg.optimizer.fused,
     )
 
+    resume_path = _checkpoint_path(cfg.checkpoint.resume_from)
+    start_step = 0
+    if resume_path is not None:
+        start_step = _load_checkpoint(resume_path, model, optimizer, device)
+
     data_iter = build_data_iterator(cfg.model, cfg.data, cfg.tokens, device)
     pipeline_engine = AllForwardAllBackwardPipelineEngine()
 
@@ -108,8 +139,10 @@ def main() -> None:
             f"Nanotron-SmVLA training: data={cfg.data.kind} "
             f"params={local_params:,}, trainable={trainable:,}"
         )
+        if resume_path is not None:
+            print(f"checkpoint_resumed path={resume_path} step={start_step}")
 
-    for step in range(1, cfg.tokens.train_steps + 1):
+    for step in range(start_step + 1, cfg.tokens.train_steps + 1):
         optimizer.zero_grad(set_to_none=True)
         outputs = pipeline_engine.train_batch_iter(
             model=model,
@@ -137,6 +170,11 @@ def main() -> None:
             dist.all_reduce(loss, group=parallel_context.dp_pg, op=dist.ReduceOp.AVG)
         if dist.get_rank(parallel_context.world_pg) == 0:
             print(f"step={step} loss={loss.item():.6f}")
+
+            if cfg.checkpoint.output_dir and cfg.checkpoint.save_every and step % int(cfg.checkpoint.save_every) == 0:
+                checkpoint_path = Path(cfg.checkpoint.output_dir) / f"step_{step:06d}.pt"
+                _save_checkpoint(checkpoint_path, model, optimizer, step, cfg.checkpoint.save_optimizer)
+                print(f"checkpoint_saved path={checkpoint_path}")
 
     torch.cuda.synchronize(device)
     parallel_context.destroy()

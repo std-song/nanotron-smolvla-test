@@ -97,6 +97,14 @@ class OptimizerConfig:
 
 
 @dataclass
+class CheckpointConfig:
+    output_dir: str | None = None
+    save_every: int | None = None
+    resume_from: str | None = None
+    save_optimizer: bool = True
+
+
+@dataclass
 class TrainConfig:
     seed: int = 42
     dtype: str = "bfloat16"
@@ -105,6 +113,7 @@ class TrainConfig:
     data: DataConfig = field(default_factory=DataConfig)
     tokens: TokensConfig = field(default_factory=TokensConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
 
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
@@ -129,4 +138,5 @@ def load_config(path: str | Path) -> TrainConfig:
         ),
         tokens=TokensConfig(**_section(raw, "tokens")),
         optimizer=OptimizerConfig.from_dict(_section(raw, "optimizer")),
+        checkpoint=CheckpointConfig(**_section(raw, "checkpoint")),
     )

@@ -59,13 +59,17 @@ data:
     root: /root/autodl-tmp/smolvla-minimal/cache/huggingface/lerobot/kuai-zi/pusht-bucket1
     max_samples: 64
 tokens:
-  train_steps: 2
+  train_steps: 50
   micro_batch_size: 1
+checkpoint:
+  output_dir: outputs/pusht_1gpu
+  save_every: 25
+  resume_from: null
 ```
 
 ## Important limitations
 
-- Stage A/B supports `dp=1,tp=1,pp=1` only.
+- Stage A-C supports `dp=1,tp=1,pp=1` only.
 - Tensor parallel and pipeline parallel are not implemented inside SmolVLA yet.
 - The model uses a reduced SmolVLM backbone (`num_vlm_layers=2`) for fast smoke tests.
 - The PushT run is a framework/data-path validation, not a useful policy training run.
@@ -96,3 +100,25 @@ step=2 loss=1.393214
 ```
 
 At verification time, `/root/autodl-tmp` remained at 64% usage.
+
+## Verified Stage C1 result
+
+Checkpoint save/resume was verified on the same AutoDL RTX 3090 host. The 50-step PushT run saved checkpoints at steps 25 and 50:
+
+```text
+step=25 loss=0.981450
+checkpoint_saved path=outputs/pusht_1gpu/step_000025.pt
+...
+step=50 loss=1.168826
+checkpoint_saved path=outputs/pusht_1gpu/step_000050.pt
+```
+
+The resume config loaded `outputs/pusht_1gpu/step_000050.pt` and continued training:
+
+```text
+checkpoint_resumed path=outputs/pusht_1gpu/step_000050.pt step=50
+step=51 loss=0.723549
+step=52 loss=0.971373
+```
+
+Each checkpoint was about 486 MB, and `/root/autodl-tmp` usage was 66% after the run.
