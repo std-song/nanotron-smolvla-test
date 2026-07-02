@@ -41,7 +41,7 @@ data:
     shuffle: true
 
 tokens:
-  train_steps: 50
+  train_steps: 5
   micro_batch_size: 1
   batch_accumulation_per_replica: 1
 
@@ -55,7 +55,7 @@ optimizer:
 
 checkpoint:
   output_dir: outputs/pusht_1gpu
-  save_every: 25
+  save_every: null
   resume_from: null
   save_optimizer: true
 
@@ -63,7 +63,7 @@ tracking:
   backend: wandb
   project: nanotron-smolvla-test
   entity: null
-  name: pusht-1gpu-checkpoint
-  tags: [stage-c2a, pusht, 1gpu]
-  mode: online
+  name: pusht-1gpu-wandb-5step
+  tags: [stage-c2a, pusht, 1gpu, wandb-smoke]
+  mode: offline
   log_every: 1

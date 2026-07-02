@@ -11,7 +11,6 @@ export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-/root/autodl-tmp/smolvla-minimal/c
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-/root/autodl-tmp/smolvla-minimal/cache/huggingface/transformers}
 export TORCH_HOME=${TORCH_HOME:-/root/autodl-tmp/smolvla-minimal/cache/torch}
 export TMPDIR=${TMPDIR:-/root/autodl-tmp/smolvla-minimal/tmp}
-export WANDB_MODE=${WANDB_MODE:-disabled}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 export PYTHONPATH="$PWD:$NANOTRON_SRC:$LEROBOT_SRC:${PYTHONPATH:-}"

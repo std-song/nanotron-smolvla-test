@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
+import time
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -30,12 +33,51 @@ def ensure_torchrun_env() -> None:
     os.environ.setdefault("MASTER_PORT", "29500")
 
 
+def _disk_used_percent(path: Path) -> float:
+    usage = shutil.disk_usage(path)
+    return usage.used / usage.total * 100.0
+
+
+def _init_tracker(cfg, enabled: bool):
+    if not enabled or cfg.tracking.backend.lower() != "wandb":
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError("tracking.backend=wandb requires the wandb package in the active environment") from exc
+    if not cfg.tracking.project:
+        raise ValueError("tracking.project is required when tracking.backend=wandb")
+    return wandb.init(
+        project=cfg.tracking.project,
+        entity=cfg.tracking.entity,
+        name=cfg.tracking.name,
+        tags=cfg.tracking.tags,
+        mode=cfg.tracking.mode,
+        config=asdict(cfg),
+    )
+
+
+def _log_tracker(run, metrics: dict, step: int) -> None:
+    if run is not None:
+        run.log(metrics, step=step)
+
+
+def _finish_tracker(run) -> None:
+    if run is not None:
+        run.finish()
+
 
 def _checkpoint_path(path: str | None) -> Path | None:
     return Path(path).expanduser() if path else None
 
 
-def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer, step: int, save_optimizer: bool) -> None:
+def _save_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    save_optimizer: bool,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "step": step,
@@ -48,7 +90,12 @@ def _save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.
     tmp_path.replace(path)
 
 
-def _load_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer | None, device: torch.device) -> int:
+def _load_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer | None,
+    device: torch.device,
+) -> int:
     checkpoint = torch.load(path, map_location=device)
     model.load_state_dict(checkpoint["model"])
     if optimizer is not None and "optimizer" in checkpoint:
@@ -131,8 +178,10 @@ def main() -> None:
 
     data_iter = build_data_iterator(cfg.model, cfg.data, cfg.tokens, device)
     pipeline_engine = AllForwardAllBackwardPipelineEngine()
+    is_rank0 = dist.get_rank(parallel_context.world_pg) == 0
+    tracker = _init_tracker(cfg, is_rank0)
 
-    if dist.get_rank(parallel_context.world_pg) == 0:
+    if is_rank0:
         local_params = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in trainable_params)
         print(
@@ -142,39 +191,65 @@ def main() -> None:
         if resume_path is not None:
             print(f"checkpoint_resumed path={resume_path} step={start_step}")
 
-    for step in range(start_step + 1, cfg.tokens.train_steps + 1):
-        optimizer.zero_grad(set_to_none=True)
-        outputs = pipeline_engine.train_batch_iter(
-            model=model,
-            pg=parallel_context.pp_pg,
-            batch=(next(data_iter) for _ in range(cfg.tokens.batch_accumulation_per_replica)),
-            nb_microbatches=cfg.tokens.batch_accumulation_per_replica,
-            grad_accumulator=None,
-        )
-
-        if parallel_context.dp_pg.size() > 1:
-            sync_gradients_across_dp(
-                module=model,
-                dp_pg=parallel_context.dp_pg,
-                reduce_op=dist.ReduceOp.AVG,
-                reduce_scatter=False,
+    try:
+        for step in range(start_step + 1, cfg.tokens.train_steps + 1):
+            step_started_at = time.perf_counter()
+            optimizer.zero_grad(set_to_none=True)
+            outputs = pipeline_engine.train_batch_iter(
+                model=model,
+                pg=parallel_context.pp_pg,
+                batch=(next(data_iter) for _ in range(cfg.tokens.batch_accumulation_per_replica)),
+                nb_microbatches=cfg.tokens.batch_accumulation_per_replica,
                 grad_accumulator=None,
             )
 
-        if cfg.optimizer.clip_grad is not None:
-            torch.nn.utils.clip_grad_norm_(trainable_params, float(cfg.optimizer.clip_grad))
-        optimizer.step()
+            if parallel_context.dp_pg.size() > 1:
+                sync_gradients_across_dp(
+                    module=model,
+                    dp_pg=parallel_context.dp_pg,
+                    reduce_op=dist.ReduceOp.AVG,
+                    reduce_scatter=False,
+                    grad_accumulator=None,
+                )
 
-        loss = torch.stack([out["loss"] for out in outputs]).sum().detach()
-        if parallel_context.dp_pg.size() > 1:
-            dist.all_reduce(loss, group=parallel_context.dp_pg, op=dist.ReduceOp.AVG)
-        if dist.get_rank(parallel_context.world_pg) == 0:
-            print(f"step={step} loss={loss.item():.6f}")
+            grad_norm = None
+            if cfg.optimizer.clip_grad is not None:
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, float(cfg.optimizer.clip_grad))
+            optimizer.step()
 
-            if cfg.checkpoint.output_dir and cfg.checkpoint.save_every and step % int(cfg.checkpoint.save_every) == 0:
-                checkpoint_path = Path(cfg.checkpoint.output_dir) / f"step_{step:06d}.pt"
-                _save_checkpoint(checkpoint_path, model, optimizer, step, cfg.checkpoint.save_optimizer)
-                print(f"checkpoint_saved path={checkpoint_path}")
+            loss = torch.stack([out["loss"] for out in outputs]).sum().detach()
+            if parallel_context.dp_pg.size() > 1:
+                dist.all_reduce(loss, group=parallel_context.dp_pg, op=dist.ReduceOp.AVG)
+
+            if is_rank0:
+                step_time = time.perf_counter() - step_started_at
+                print(f"step={step} loss={loss.item():.6f}")
+
+                if step % max(int(cfg.tracking.log_every), 1) == 0:
+                    samples_seen = (
+                        step
+                        * cfg.tokens.micro_batch_size
+                        * cfg.tokens.batch_accumulation_per_replica
+                        * cfg.parallelism.dp
+                    )
+                    metrics = {
+                        "train/loss": loss.item(),
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                        "train/step_time_sec": step_time,
+                        "train/samples_seen": samples_seen,
+                        "system/disk_used_percent": _disk_used_percent(Path.cwd()),
+                    }
+                    if grad_norm is not None:
+                        metrics["train/grad_norm"] = float(grad_norm.detach().cpu())
+                    _log_tracker(tracker, metrics, step)
+
+                if cfg.checkpoint.output_dir and cfg.checkpoint.save_every and step % int(cfg.checkpoint.save_every) == 0:
+                    checkpoint_path = Path(cfg.checkpoint.output_dir) / f"step_{step:06d}.pt"
+                    _save_checkpoint(checkpoint_path, model, optimizer, step, cfg.checkpoint.save_optimizer)
+                    print(f"checkpoint_saved path={checkpoint_path}")
+                    _log_tracker(tracker, {"checkpoint/saved": 1, "checkpoint/step": step}, step)
+    finally:
+        _finish_tracker(tracker)
 
     torch.cuda.synchronize(device)
     parallel_context.destroy()

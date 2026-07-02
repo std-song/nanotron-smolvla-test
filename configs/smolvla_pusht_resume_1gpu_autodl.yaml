@@ -58,3 +58,12 @@ checkpoint:
   save_every: 25
   resume_from: outputs/pusht_1gpu/step_000050.pt
   save_optimizer: true
+
+tracking:
+  backend: wandb
+  project: nanotron-smolvla-test
+  entity: null
+  name: pusht-1gpu-checkpoint
+  tags: [stage-c2a, pusht, 1gpu]
+  mode: online
+  log_every: 1

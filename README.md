@@ -65,6 +65,39 @@ checkpoint:
   output_dir: outputs/pusht_1gpu
   save_every: 25
   resume_from: null
+tracking:
+  backend: wandb
+  project: nanotron-smolvla-test
+  name: pusht-1gpu-checkpoint
+  mode: online
+```
+
+
+## W&B tracking
+
+Tracking is optional and only initialized on rank 0. The current W&B metrics are:
+
+- `train/loss`
+- `train/lr`
+- `train/grad_norm`
+- `train/step_time_sec`
+- `train/samples_seen`
+- `system/disk_used_percent`
+- `checkpoint/saved`
+
+For online tracking on AutoDL, log in once before running:
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate /root/autodl-tmp/smolvla-minimal/conda-py312
+wandb login
+```
+
+The 5-step smoke config uses offline mode and can be synced later:
+
+```bash
+bash scripts/run_pusht_1gpu_autodl.sh configs/smolvla_pusht_wandb_5step_autodl.yaml
+wandb sync /root/autodl-tmp/nanotron-smolvla-project/wandb/offline-run-YYYYMMDD_HHMMSS-xxxx
 ```
 
 ## Important limitations
@@ -122,3 +155,24 @@ step=52 loss=0.971373
 ```
 
 Each checkpoint was about 486 MB, and `/root/autodl-tmp` usage was 66% after the run.
+
+## Verified Stage C2a result
+
+W&B metric logging was verified on AutoDL in offline mode with the 5-step PushT smoke config. The run wrote local W&B data under `wandb/offline-run-20260702_161947-v1s1bin5` and reported these metrics:
+
+```text
+step=1 loss=1.369288
+step=2 loss=1.393214
+step=3 loss=1.315108
+step=4 loss=1.526516
+step=5 loss=1.235370
+wandb: Run summary:
+wandb: system/disk_used_percent 65.84843
+wandb: train/grad_norm 8.8125
+wandb: train/loss 1.23537
+wandb: train/lr 0.0001
+wandb: train/samples_seen 5
+wandb: train/step_time_sec 0.05516
+```
+
+The AutoDL environment had `wandb` installed, but `wandb status` showed `api_key: null`, so online sync requires `wandb login` first.

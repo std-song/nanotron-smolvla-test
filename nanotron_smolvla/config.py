@@ -105,6 +105,17 @@ class CheckpointConfig:
 
 
 @dataclass
+class TrackingConfig:
+    backend: str = "disabled"
+    project: str | None = None
+    entity: str | None = None
+    name: str | None = None
+    tags: list[str] = field(default_factory=list)
+    mode: str | None = None
+    log_every: int = 1
+
+
+@dataclass
 class TrainConfig:
     seed: int = 42
     dtype: str = "bfloat16"
@@ -114,6 +125,7 @@ class TrainConfig:
     tokens: TokensConfig = field(default_factory=TokensConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+    tracking: TrackingConfig = field(default_factory=TrackingConfig)
 
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
@@ -139,4 +151,5 @@ def load_config(path: str | Path) -> TrainConfig:
         tokens=TokensConfig(**_section(raw, "tokens")),
         optimizer=OptimizerConfig.from_dict(_section(raw, "optimizer")),
         checkpoint=CheckpointConfig(**_section(raw, "checkpoint")),
+        tracking=TrackingConfig(**_section(raw, "tracking")),
     )
