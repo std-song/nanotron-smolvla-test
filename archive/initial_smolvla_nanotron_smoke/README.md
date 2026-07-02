@@ -1,5 +1,6 @@
-﻿# Minimal SmolVLA training with Nanotron primitives
+# Minimal SmolVLA training with Nanotron primitives
 
+> Archive notice: this directory preserves the first minimal prototype for historical reference. New work should use `nanotron_smolvla/`, `configs/`, and `scripts/` at the repository root.
 This example runs LeRobot's `SmolVLA` loss through Nanotron's distributed process groups,
 model builder, parameter metadata checks, and pipeline engine. It intentionally starts with
 random dummy robot batches so the training framework bridge can be validated before wiring a

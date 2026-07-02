@@ -7,8 +7,8 @@ This repository contains a minimal but structured bridge for training LeRobot Sm
 - Stage A: Refactor the original smoke test into a small Python project.
 - Stage B: Add a real `LeRobotDataset` backend and verify single-GPU training on the PushT dataset.
 
-The original smoke-test files and first verification notes are preserved in `smolvla_nanotron/`.
 The active project code lives in `nanotron_smolvla/`.
+The original prototype is preserved under `archive/initial_smolvla_nanotron_smoke/` for historical reference only.
 
 ## Layout
 
@@ -24,9 +24,17 @@ configs/
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
-smolvla_nanotron/
-  # archived initial smoke-test script and verification notes
+archive/
+  initial_smolvla_nanotron_smoke/
+    # archived initial prototype and first verification notes
 ```
+
+## Repository Roles
+
+- `nanotron_smolvla/` is the active training package. New work, including checkpointing, W&B tracking, 2DP, 2TP, and 2PP, should be implemented here.
+- `configs/` contains runnable YAML configs for AutoDL and smoke validations.
+- `scripts/` contains launcher scripts for the AutoDL environment.
+- `archive/initial_smolvla_nanotron_smoke/` is read-only historical reference from the first minimal bridge prototype.
 
 ## Stage A: dummy smoke test
 
@@ -118,7 +126,7 @@ step=1 loss=2.707207
 step=2 loss=2.689403
 ```
 
-See `smolvla_nanotron/RESULTS.md` for the original result details.
+See `archive/initial_smolvla_nanotron_smoke/RESULTS.md` for the original result details.
 
 ## Verified Stage B result
 
