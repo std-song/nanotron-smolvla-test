@@ -1,0 +1,12 @@
+[project]
+name = "nanotron-smolvla-test"
+version = "0.1.0"
+description = "Minimal Nanotron training bridge for LeRobot SmolVLA"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "pyyaml",
+]
+
+[tool.setuptools.packages.find]
+include = ["nanotron_smolvla*"]

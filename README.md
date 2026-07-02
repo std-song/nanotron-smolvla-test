@@ -1,66 +1,98 @@
-﻿# Minimal SmolVLA training with Nanotron primitives
+# Nanotron-SmVLA Test Project
 
-This example runs LeRobot's `SmolVLA` loss through Nanotron's distributed process groups,
-model builder, parameter metadata checks, and pipeline engine. It intentionally starts with
-random dummy robot batches so the training framework bridge can be validated before wiring a
-real `LeRobotDataset`.
+This repository contains a minimal but structured bridge for training LeRobot SmolVLA through Nanotron primitives.
 
-## What this proves
+## Current milestones
 
-- Nanotron can initialize a SmolVLA wrapper as a `NanotronModel`.
-- Nanotron's `PipelineBlock` / `AllForwardAllBackwardPipelineEngine` can drive SmolVLA forward and backward.
-- Nanotron-compatible parameter metadata can be attached to the wrapped SmolVLA parameters.
-- A minimal optimizer step works on CUDA with bf16 autocast.
+- Stage A: Refactor the original smoke test into a small Python project.
+- Stage B: Add a real `LeRobotDataset` backend and verify single-GPU training on the PushT dataset.
 
-## Current scope
+The original smoke-test files and first verification notes are preserved in `smolvla_nanotron/`.
+The active project code lives in `nanotron_smolvla/`.
 
-- Supported: CUDA, `tp=1`, `pp=1`, `dp=1` for the smoke test.
-- Data: synthetic images, language tokens, state, and actions.
-- Model: LeRobot `VLAFlowMatching` with a reduced SmolVLM backbone (`num_vlm_layers=2`).
-- Not yet supported: Nanotron tensor parallel or pipeline parallel inside SmolVLA internals.
-- Not yet included: checkpoint save/load and a real LeRobot dataset collator.
+## Layout
 
-## Files
-
-- `modeling.py`: SmolVLA-to-Nanotron model wrapper.
-- `run_train.py`: minimal Nanotron-style training entrypoint.
-- `config_minimal.yaml`: generic online/cache-backed config.
-- `config_offline_autodl.yaml`: the exact offline AutoDL config used for verification.
-- `RESULTS.md`: remote GPU verification notes and outputs.
-
-## Run
-
-From the `nanotron` repository root:
-
-```bash
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export PYTHONPATH=/path/to/nanotron/src:/path/to/lerobot/src:${PYTHONPATH:-}
-
-torchrun --nproc_per_node=1 examples/smolvla_nanotron/run_train.py \
-  --config-file examples/smolvla_nanotron/config_minimal.yaml \
-  --lerobot-src /path/to/lerobot/src
+```text
+nanotron_smolvla/
+  config.py        # YAML config dataclasses
+  data.py          # dummy and LeRobotDataset batch iterators
+  model.py         # SmolVLA wrapped as a NanotronModel
+  train.py         # Nanotron-style training entrypoint
+configs/
+  smolvla_dummy_1gpu.yaml
+  smolvla_pusht_1gpu_autodl.yaml
+scripts/
+  run_dummy_1gpu.sh
+  run_pusht_1gpu_autodl.sh
+smolvla_nanotron/
+  # archived initial smoke-test script and verification notes
 ```
 
-On the verified AutoDL machine, the offline run used:
+## Stage A: dummy smoke test
+
+```bash
+export NANOTRON_SRC=/path/to/nanotron/src
+export LEROBOT_SRC=/path/to/lerobot/src
+bash scripts/run_dummy_1gpu.sh configs/smolvla_dummy_1gpu.yaml
+```
+
+## Stage B: real LeRobotDataset smoke test on PushT
+
+This uses the same small PushT dataset that was previously used for the official SmolVLA training smoke test.
+On the AutoDL host, the config points to the cached SmolVLM snapshot and the downloaded local PushT dataset at `/root/autodl-tmp/smolvla-minimal/cache/huggingface/lerobot/kuai-zi/pusht-bucket1`.
 
 ```bash
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate /root/autodl-tmp/smolvla-minimal/conda-py312
 
-export HF_HOME=/root/autodl-tmp/smolvla-minimal/cache/huggingface
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
-export PYTHONPATH=/root/autodl-tmp/nanotron-minimal/nanotron/src:/root/autodl-tmp/smolvla-minimal/lerobot/src:/root/autodl-tmp/nanotron-smolvla-bridge
-
-cd /root/autodl-tmp/nanotron-smolvla-bridge
-CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 run_train.py \
-  --config-file config_offline_autodl.yaml \
-  --lerobot-src /root/autodl-tmp/smolvla-minimal/lerobot/src
+cd /root/autodl-tmp/nanotron-smolvla-project
+bash scripts/run_pusht_1gpu_autodl.sh configs/smolvla_pusht_1gpu_autodl.yaml
 ```
 
-## Next steps
+The default verification config is deliberately tiny:
 
-1. Replace `infinite_dummy_batches` with a LeRobot dataset collator that emits the same tensor keys.
-2. Decide which SmolVLA parameters to train: expert-only, state projection, or full VLM fine-tuning.
-3. Add checkpoint save/load in Nanotron format.
-4. Only after the single-card path is stable, split SmolVLA internals into Nanotron TP/PP-aware blocks.
+```yaml
+data:
+  kind: lerobot
+  lerobot:
+    repo_id: kuai-zi/smolvla-pusht-autodl
+    root: /root/autodl-tmp/smolvla-minimal/cache/huggingface/lerobot/kuai-zi/pusht-bucket1
+    max_samples: 64
+tokens:
+  train_steps: 2
+  micro_batch_size: 1
+```
+
+## Important limitations
+
+- Stage A/B supports `dp=1,tp=1,pp=1` only.
+- Tensor parallel and pipeline parallel are not implemented inside SmolVLA yet.
+- The model uses a reduced SmolVLM backbone (`num_vlm_layers=2`) for fast smoke tests.
+- The PushT run is a framework/data-path validation, not a useful policy training run.
+
+## Verified first smoke-test result
+
+The initial dummy run on AutoDL RTX 3090 produced:
+
+```text
+Reducing the number of VLM layers to 2 ...
+SmolVLA/Nanotron minimal training: params=226,429,216, trainable=13,916,512
+step=1 loss=2.707207
+step=2 loss=2.689403
+```
+
+See `smolvla_nanotron/RESULTS.md` for the original result details.
+
+## Verified Stage B result
+
+The real PushT `LeRobotDataset` run was verified on the AutoDL RTX 3090 host with the downloaded dataset at `/root/autodl-tmp/smolvla-minimal/cache/huggingface/lerobot/kuai-zi/pusht-bucket1`.
+The data adapter resizes real images to the configured SmolVLM input size before forwarding them through SmolVLA.
+
+```text
+Reducing the number of VLM layers to 2 ...
+Nanotron-SmVLA training: data=lerobot params=226,429,216, trainable=13,916,512
+step=1 loss=1.369288
+step=2 loss=1.393214
+```
+
+At verification time, `/root/autodl-tmp` remained at 64% usage.
