@@ -110,7 +110,7 @@ def _ranked_checkpoint_path(path: Path, rank: int) -> Path:
 
 
 def _local_checkpoint_path(path: Path, parallel_context, dist_module) -> Path:
-    if parallel_context.tp_pg.size() == 1:
+    if parallel_context.tp_pg.size() == 1 and parallel_context.pp_pg.size() == 1:
         return path
     return _ranked_checkpoint_path(path, dist_module.get_rank(parallel_context.world_pg))
 
@@ -179,8 +179,6 @@ def main() -> None:
             raise ValueError("PP1 currently supports pp=2,tp=1 only. Add TP after the PP boundary is stable.")
         if cfg.model.expert_tensor_parallel:
             raise ValueError("PP1 currently requires model.expert_tensor_parallel=false.")
-        if cfg.checkpoint.output_dir and cfg.checkpoint.save_every:
-            raise ValueError("PP checkpoint sharding is not implemented yet; disable checkpoint.save_every for PP1 smoke.")
     if cfg.parallelism.tp != 1 and not cfg.model.expert_tensor_parallel:
         raise ValueError("tp>1 requires model.expert_tensor_parallel=true for the TP1 expert-only path.")
     parallel_context = ParallelContext(
@@ -308,14 +306,14 @@ def main() -> None:
             if cfg.checkpoint.output_dir and cfg.checkpoint.save_every and step % int(cfg.checkpoint.save_every) == 0:
                 checkpoint_path = Path(cfg.checkpoint.output_dir) / f"step_{step:06d}.pt"
                 local_checkpoint_path = _local_checkpoint_path(checkpoint_path, parallel_context, dist)
-                if is_rank0 or parallel_context.tp_pg.size() > 1:
+                if is_rank0 or parallel_context.tp_pg.size() > 1 or parallel_context.pp_pg.size() > 1:
                     _save_checkpoint(local_checkpoint_path, model, optimizer, step, cfg.checkpoint.save_optimizer)
                 if parallel_context.world_pg.size() > 1:
                     dist.barrier(parallel_context.world_pg)
                 if is_rank0:
                     print(f"checkpoint_saved path={checkpoint_path}")
-                    if parallel_context.tp_pg.size() > 1:
-                        print(f"checkpoint_saved_tp_shards pattern={checkpoint_path.stem}_rank_*.pt")
+                    if parallel_context.tp_pg.size() > 1 or parallel_context.pp_pg.size() > 1:
+                        print(f"checkpoint_saved_rank_shards pattern={checkpoint_path.stem}_rank_*.pt")
                     _log_tracker(tracker, {"checkpoint/saved": 1, "checkpoint/step": step}, step)
     finally:
         _finish_tracker(tracker)
