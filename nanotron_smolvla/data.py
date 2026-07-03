@@ -6,6 +6,7 @@ from typing import Iterator
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
+from torch.utils.data.distributed import DistributedSampler
 
 from .config import DataConfig, SmolVLAModelConfig, TokensConfig
 
@@ -32,6 +33,8 @@ def infinite_dummy_batches(
     data_config: DataConfig,
     tokens_config: TokensConfig,
     device: torch.device,
+    data_rank: int = 0,
+    data_world_size: int = 1,
 ) -> Iterator[dict[str, torch.Tensor]]:
     vocab_size = int(data_config.dummy.language_vocab_size)
     batch_size = int(tokens_config.micro_batch_size)
@@ -66,7 +69,13 @@ class LeRobotBatchAdapter:
         self.preprocessor = None
         self.camera_key = None
 
-    def build(self, data_config: DataConfig, tokens_config: TokensConfig):
+    def build(
+        self,
+        data_config: DataConfig,
+        tokens_config: TokensConfig,
+        data_rank: int = 0,
+        data_world_size: int = 1,
+    ):
         from lerobot.datasets.factory import resolve_delta_timestamps
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
         from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
@@ -126,10 +135,22 @@ class LeRobotBatchAdapter:
 
         self.preprocessor, _ = make_smolvla_pre_post_processors(policy_cfg, dataset_stats=ds_meta.stats)
         collate_fn = lerobot_collate_fn if ds_meta.has_language_columns else None
+        sampler = None
+        shuffle = cfg.shuffle
+        if data_world_size > 1:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=data_world_size,
+                rank=data_rank,
+                shuffle=cfg.shuffle,
+                drop_last=False,
+            )
+            shuffle = False
         dataloader = DataLoader(
             dataset,
             batch_size=tokens_config.micro_batch_size,
-            shuffle=cfg.shuffle,
+            shuffle=shuffle,
+            sampler=sampler,
             num_workers=cfg.num_workers,
             pin_memory=self.device.type == "cuda",
             drop_last=False,
@@ -188,12 +209,14 @@ def build_data_iterator(
     data_config: DataConfig,
     tokens_config: TokensConfig,
     device: torch.device,
+    data_rank: int = 0,
+    data_world_size: int = 1,
 ) -> Iterator[dict[str, torch.Tensor]]:
     if data_config.kind == "dummy":
         return infinite_dummy_batches(model_config, data_config, tokens_config, device)
     if data_config.kind == "lerobot":
         adapter = LeRobotBatchAdapter(model_config=model_config, device=device)
-        dataloader = adapter.build(data_config, tokens_config)
+        dataloader = adapter.build(data_config, tokens_config, data_rank=data_rank, data_world_size=data_world_size)
 
         def iterator():
             for raw_batch in cycle(dataloader):

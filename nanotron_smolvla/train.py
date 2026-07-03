@@ -67,6 +67,14 @@ def _finish_tracker(run) -> None:
         run.finish()
 
 
+
+def _sync_trainable_gradients_across_dp(trainable_params: list[torch.nn.Parameter], dp_pg, dist_module) -> None:
+    for param in trainable_params:
+        if param.grad is None:
+            param.grad = torch.zeros_like(param)
+        dist_module.all_reduce(param.grad, group=dp_pg, op=dist_module.ReduceOp.AVG)
+
+
 def _checkpoint_path(path: str | None) -> Path | None:
     return Path(path).expanduser() if path else None
 
@@ -118,7 +126,6 @@ def main() -> None:
     from nanotron import distributed as dist
     from nanotron.models import build_model
     from nanotron.parallel import ParallelContext
-    from nanotron.parallel.data_parallel.utils import sync_gradients_across_dp
     from nanotron.parallel.parameters import sanity_check
     from nanotron.parallel.pipeline_parallel.engine import AllForwardAllBackwardPipelineEngine
 
@@ -176,7 +183,16 @@ def main() -> None:
     if resume_path is not None:
         start_step = _load_checkpoint(resume_path, model, optimizer, device)
 
-    data_iter = build_data_iterator(cfg.model, cfg.data, cfg.tokens, device)
+    dp_rank = dist.get_rank(parallel_context.dp_pg)
+    dp_size = parallel_context.dp_pg.size()
+    data_iter = build_data_iterator(
+        cfg.model,
+        cfg.data,
+        cfg.tokens,
+        device,
+        data_rank=dp_rank,
+        data_world_size=dp_size,
+    )
     pipeline_engine = AllForwardAllBackwardPipelineEngine()
     is_rank0 = dist.get_rank(parallel_context.world_pg) == 0
     tracker = _init_tracker(cfg, is_rank0)
@@ -186,6 +202,7 @@ def main() -> None:
         trainable = sum(p.numel() for p in trainable_params)
         print(
             f"Nanotron-SmVLA training: data={cfg.data.kind} "
+            f"dp={dp_size}, tp={cfg.parallelism.tp}, pp={cfg.parallelism.pp}, "
             f"params={local_params:,}, trainable={trainable:,}"
         )
         if resume_path is not None:
@@ -204,13 +221,7 @@ def main() -> None:
             )
 
             if parallel_context.dp_pg.size() > 1:
-                sync_gradients_across_dp(
-                    module=model,
-                    dp_pg=parallel_context.dp_pg,
-                    reduce_op=dist.ReduceOp.AVG,
-                    reduce_scatter=False,
-                    grad_accumulator=None,
-                )
+                _sync_trainable_gradients_across_dp(trainable_params, parallel_context.dp_pg, dist)
 
             grad_norm = None
             if cfg.optimizer.clip_grad is not None:

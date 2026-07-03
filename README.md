@@ -6,6 +6,7 @@ This repository contains a minimal but structured bridge for training LeRobot Sm
 
 - Stage A: Refactor the original smoke test into a small Python project.
 - Stage B: Add a real `LeRobotDataset` backend and verify single-GPU training on the PushT dataset.
+- Stage D: Verify 2-way data parallel training on one 2-GPU AutoDL instance.
 
 The active project code lives in `nanotron_smolvla/`.
 The original prototype is preserved under `archive/initial_smolvla_nanotron_smoke/` for historical reference only.
@@ -21,9 +22,11 @@ nanotron_smolvla/
 configs/
   smolvla_dummy_1gpu.yaml
   smolvla_pusht_1gpu_autodl.yaml
+  smolvla_pusht_2dp_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
+  run_pusht_2dp_autodl.sh
 archive/
   initial_smolvla_nanotron_smoke/
     # archived initial prototype and first verification notes
@@ -81,6 +84,16 @@ tracking:
 ```
 
 
+
+## Stage D: 2DP smoke test
+
+The 2DP launcher uses `torchrun --nproc_per_node=2` with `dp=2,tp=1,pp=1`. The LeRobot dataloader uses a `DistributedSampler` so each DP rank reads a shard, while rank 0 owns W&B logging and checkpoint writes.
+
+```bash
+cd /root/autodl-tmp/nanotron-smolvla-project
+bash scripts/run_pusht_2dp_autodl.sh configs/smolvla_pusht_2dp_autodl.yaml
+```
+
 ## W&B tracking
 
 Tracking is optional and only initialized on rank 0. The current W&B metrics are:
@@ -110,7 +123,7 @@ wandb sync /root/autodl-tmp/nanotron-smolvla-project/wandb/offline-run-YYYYMMDD_
 
 ## Important limitations
 
-- Stage A-C supports `dp=1,tp=1,pp=1` only.
+- Stage A-C supports `dp=1,tp=1,pp=1`; Stage D verifies `dp=2,tp=1,pp=1`.
 - Tensor parallel and pipeline parallel are not implemented inside SmolVLA yet.
 - The model uses a reduced SmolVLM backbone (`num_vlm_layers=2`) for fast smoke tests.
 - The PushT run is a framework/data-path validation, not a useful policy training run.
@@ -184,3 +197,22 @@ wandb: train/step_time_sec 0.05516
 ```
 
 The AutoDL environment had `wandb` installed, but `wandb status` showed `api_key: null`, so online sync requires `wandb login` first.
+
+## Verified Stage D result
+
+2-way data parallel training was verified on a cloned AutoDL instance with two RTX 3090 GPUs, driver/CUDA compatible with `torch 2.11.0+cu130`. The run used `configs/smolvla_pusht_2dp_autodl.yaml` and `scripts/run_pusht_2dp_autodl.sh`.
+
+```text
+Nanotron-SmVLA training: data=lerobot dp=2, tp=1, pp=1, params=226,429,216, trainable=13,916,512
+step=1 loss=1.407345
+step=2 loss=1.466055
+step=3 loss=1.361035
+step=4 loss=1.488127
+step=5 loss=1.204177
+wandb: Run summary:
+wandb: train/grad_norm 6.84375
+wandb: train/loss 1.20418
+wandb: train/samples_seen 10
+```
+
+The DP path uses project-local gradient synchronization over trainable parameters only. Missing gradients are treated as zero, which avoids all-reducing frozen or conditionally unused SmolVLA parameters.
