@@ -65,7 +65,7 @@ Validation ladder:
 1. `tp=1` equivalence smoke: replacement path enabled but TP size is 1.
 2. `tp=2` dummy smoke: 2 steps, no PushT data dependency.
 3. `tp=2` PushT smoke: 5 steps. Verified on AutoDL with `configs/smolvla_pusht_2tp_autodl.yaml`.
-4. `tp=2` PushT stability: 50 steps plus checkpoint save/resume.
+4. `tp=2` PushT stability: 50 steps plus checkpoint save/resume. Verified with TP rank-local checkpoint shards.
 
 ## Stage TP2: 2DP x 2TP
 

@@ -42,7 +42,7 @@ data:
     shuffle: true
 
 tokens:
-  train_steps: 50
+  train_steps: 52
   micro_batch_size: 1
   batch_accumulation_per_replica: 1
 
@@ -57,14 +57,14 @@ optimizer:
 checkpoint:
   output_dir: outputs/pusht_2tp
   save_every: 25
-  resume_from: null
+  resume_from: outputs/pusht_2tp/step_000050.pt
   save_optimizer: true
 
 tracking:
   backend: wandb
   project: nanotron-smolvla-test
   entity: null
-  name: pusht-2tp-expert-checkpoint
-  tags: [stage-tp1, pusht, 2tp, expert-only, checkpoint]
+  name: pusht-2tp-expert-resume
+  tags: [stage-tp1, pusht, 2tp, expert-only, resume]
   mode: offline
   log_every: 1

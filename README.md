@@ -25,6 +25,7 @@ configs/
   smolvla_pusht_1gpu_autodl.yaml
   smolvla_pusht_2dp_autodl.yaml
   smolvla_pusht_2tp_autodl.yaml
+  smolvla_pusht_2tp_resume_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
@@ -267,3 +268,35 @@ wandb: train/samples_seen 5
 ```
 
 The W&B offline run was written to `/root/autodl-tmp/nanotron-smolvla-project/wandb/wandb/offline-run-20260703_102901-zrhjfdk0`.
+
+## Verified Stage TP1 stability result
+
+The expert-only 2TP path was extended to 50 PushT steps with TP-sharded checkpoint save/resume. Because TP ranks hold different parameter shards, TP checkpoints are saved per world rank:
+
+```text
+outputs/pusht_2tp/step_000050_rank_000.pt 450M
+outputs/pusht_2tp/step_000050_rank_001.pt 450M
+```
+
+The 50-step run produced:
+
+```text
+step=25 loss=0.966962
+checkpoint_saved path=outputs/pusht_2tp/step_000025.pt
+checkpoint_saved_tp_shards pattern=step_000025_rank_*.pt
+...
+step=50 loss=1.173062
+checkpoint_saved path=outputs/pusht_2tp/step_000050.pt
+checkpoint_saved_tp_shards pattern=step_000050_rank_*.pt
+wandb: train/samples_seen 50
+wandb: system/disk_used_percent 69.50324
+```
+
+The resume config loaded `outputs/pusht_2tp/step_000050.pt`, which resolves to each rank's local shard file, then continued training:
+
+```text
+checkpoint_resumed path=outputs/pusht_2tp/step_000050.pt step=50
+step=51 loss=0.690763
+step=52 loss=0.956361
+wandb: system/disk_used_percent 71.26103
+```

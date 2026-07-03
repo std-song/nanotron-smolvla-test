@@ -79,6 +79,15 @@ def _checkpoint_path(path: str | None) -> Path | None:
     return Path(path).expanduser() if path else None
 
 
+def _ranked_checkpoint_path(path: Path, rank: int) -> Path:
+    return path.with_name(f"{path.stem}_rank_{rank:03d}{path.suffix}")
+
+
+def _local_checkpoint_path(path: Path, parallel_context, dist_module) -> Path:
+    if parallel_context.tp_pg.size() == 1:
+        return path
+    return _ranked_checkpoint_path(path, dist_module.get_rank(parallel_context.world_pg))
+
 def _save_checkpoint(
     path: Path,
     model: torch.nn.Module,
@@ -182,8 +191,8 @@ def main() -> None:
     resume_path = _checkpoint_path(cfg.checkpoint.resume_from)
     start_step = 0
     if resume_path is not None:
-        start_step = _load_checkpoint(resume_path, model, optimizer, device)
-
+        local_resume_path = _local_checkpoint_path(resume_path, parallel_context, dist)
+        start_step = _load_checkpoint(local_resume_path, model, optimizer, device)
     dp_rank = dist.get_rank(parallel_context.dp_pg)
     dp_size = parallel_context.dp_pg.size()
     data_iter = build_data_iterator(
@@ -255,10 +264,18 @@ def main() -> None:
                         metrics["train/grad_norm"] = float(grad_norm.detach().cpu())
                     _log_tracker(tracker, metrics, step)
 
-                if cfg.checkpoint.output_dir and cfg.checkpoint.save_every and step % int(cfg.checkpoint.save_every) == 0:
-                    checkpoint_path = Path(cfg.checkpoint.output_dir) / f"step_{step:06d}.pt"
-                    _save_checkpoint(checkpoint_path, model, optimizer, step, cfg.checkpoint.save_optimizer)
+
+            if cfg.checkpoint.output_dir and cfg.checkpoint.save_every and step % int(cfg.checkpoint.save_every) == 0:
+                checkpoint_path = Path(cfg.checkpoint.output_dir) / f"step_{step:06d}.pt"
+                local_checkpoint_path = _local_checkpoint_path(checkpoint_path, parallel_context, dist)
+                if is_rank0 or parallel_context.tp_pg.size() > 1:
+                    _save_checkpoint(local_checkpoint_path, model, optimizer, step, cfg.checkpoint.save_optimizer)
+                if parallel_context.world_pg.size() > 1:
+                    dist.barrier(parallel_context.world_pg)
+                if is_rank0:
                     print(f"checkpoint_saved path={checkpoint_path}")
+                    if parallel_context.tp_pg.size() > 1:
+                        print(f"checkpoint_saved_tp_shards pattern={checkpoint_path.stem}_rank_*.pt")
                     _log_tracker(tracker, {"checkpoint/saved": 1, "checkpoint/step": step}, step)
     finally:
         _finish_tracker(tracker)
