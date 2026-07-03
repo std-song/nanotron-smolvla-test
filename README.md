@@ -27,6 +27,10 @@ scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
   run_pusht_2dp_autodl.sh
+  inspect_smolvla_topology.py
+docs/
+  TP_PP_PLAN.md
+  TOPOLOGY_PUSHT_2L.md
 archive/
   initial_smolvla_nanotron_smoke/
     # archived initial prototype and first verification notes
@@ -227,3 +231,17 @@ wandb: train/samples_seen 104
 
 Each 2DP checkpoint was about 486 MB. `/root/autodl-tmp` usage was 68% after the stable and resume runs.
 The DP path uses project-local gradient synchronization over trainable parameters only. Missing gradients are treated as zero, which avoids all-reducing frozen or conditionally unused SmolVLA parameters.
+
+## Next stage: 2TP planning
+
+The 2TP/2PP route is documented in `docs/TP_PP_PLAN.md`, with the current two-layer PushT topology recorded in `docs/TOPOLOGY_PUSHT_2L.md`. Before replacing any SmolVLA internals with Nanotron tensor-parallel layers, inspect the real module topology on AutoDL:
+
+```bash
+cd /root/autodl-tmp/nanotron-smolvla-project
+python scripts/inspect_smolvla_topology.py \
+  --config-file configs/smolvla_pusht_2dp_autodl.yaml \
+  --nanotron-src /root/autodl-tmp/nanotron-minimal/nanotron/src \
+  --lerobot-src /root/autodl-tmp/smolvla-minimal/lerobot/src \
+  --max-lines 300
+```
+
