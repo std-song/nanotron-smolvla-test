@@ -1,0 +1,71 @@
+seed: 42
+dtype: bfloat16
+
+parallelism:
+  dp: 1
+  pp: 2
+  tp: 2
+
+model:
+  # On the verified AutoDL host, this path points at the cached local snapshot.
+  # Replace it with HuggingFaceTB/SmolVLM2-500M-Video-Instruct when online.
+  vlm_model_name: /root/autodl-tmp/smolvla-minimal/cache/huggingface/hub/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct/snapshots/7b375e1b73b11138ff12fe22c8f2822d8fe03467
+  load_vlm_weights: false
+  train_expert_only: true
+  freeze_vision_encoder: true
+  train_state_proj: true
+  attention_mode: cross_attn
+  num_vlm_layers: 2
+  num_expert_layers: 2
+  self_attn_every_n_layers: 2
+  expert_width_multiplier: 0.75
+  max_state_dim: 32
+  max_action_dim: 32
+  chunk_size: 8
+  tokenizer_max_length: 48
+  image_key: observation.image
+  image_shape: [3, 512, 512]
+  device: cuda
+  compile_model: false
+  expert_tensor_parallel: true
+  pipeline_split_layer: 1
+
+data:
+  kind: lerobot
+  lerobot:
+    repo_id: kuai-zi/smolvla-pusht-autodl
+    root: /root/autodl-tmp/smolvla-minimal/cache/huggingface/lerobot/kuai-zi/pusht-bucket1
+    revision: null
+    episodes: null
+    video_backend: pyav
+    num_workers: 0
+    max_samples: 64
+    shuffle: true
+
+tokens:
+  train_steps: 5
+  micro_batch_size: 1
+  batch_accumulation_per_replica: 1
+
+optimizer:
+  lr: 0.0001
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 1.0e-10
+  clip_grad: 10.0
+  fused: true
+
+checkpoint:
+  output_dir: null
+  save_every: null
+  resume_from: null
+  save_optimizer: true
+
+tracking:
+  backend: wandb
+  project: nanotron-smolvla-test
+  entity: null
+  name: pusht-2tp-2pp-smoke
+  tags: [stage-tp-pp, pusht, 2tp, 2pp, expert-only, smoke]
+  mode: offline
+  log_every: 1

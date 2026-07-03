@@ -11,6 +11,7 @@ This repository contains a minimal but structured bridge for training LeRobot Sm
 - Stage TP2: Verify combined 2DP x 2TP expert-only training on one 4-GPU AutoDL instance.
 - Stage PP0: Refactor SmolVLA training forward into pipeline-ready pieces while preserving pp=1 behavior.
 - Stage PP1: Verify 2-stage pipeline parallel training, checkpoint save, and checkpoint resume on a 4-GPU AutoDL instance using 2 GPUs.
+- Stage TP+PP: Verify expert-only `dp=1,tp=2,pp=2` training on one 4-GPU AutoDL instance.
 
 The active project code lives in `nanotron_smolvla/`.
 The original prototype is preserved under `archive/initial_smolvla_nanotron_smoke/` for historical reference only.
@@ -37,6 +38,7 @@ configs/
   smolvla_pusht_pp1_2pp_50step_autodl.yaml
   smolvla_pusht_pp1_2pp_50step_ckpt_autodl.yaml
   smolvla_pusht_pp1_2pp_resume_autodl.yaml
+  smolvla_pusht_2tp_2pp_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
@@ -44,6 +46,7 @@ scripts/
   run_pusht_2tp_autodl.sh
   run_pusht_2dp_2tp_autodl.sh
   run_pusht_pp1_2pp_autodl.sh
+  run_pusht_2tp_2pp_autodl.sh
   inspect_smolvla_topology.py
 docs/
   TP_PP_PLAN.md
@@ -146,7 +149,8 @@ wandb sync /root/autodl-tmp/nanotron-smolvla-project/wandb/offline-run-YYYYMMDD_
 
 - Stage A-C supports `dp=1,tp=1,pp=1`; Stage D verifies `dp=2,tp=1,pp=1`.
 - Expert-only TP is verified for `dp=1,tp=2,pp=1` and `dp=2,tp=2,pp=1`.
-- PP1 is verified for `dp=1,tp=1,pp=2`; TP+PP composition is still the next stage.
+- PP1 is verified for `dp=1,tp=1,pp=2`.
+- Expert-only TP+PP is verified for `dp=1,tp=2,pp=2`; `dp=2,tp=2,pp=2` is still the next stage and requires 8 GPUs.
 - The model uses a reduced SmolVLM backbone (`num_vlm_layers=2`) for fast smoke tests.
 - The PushT run is a framework/data-path validation, not a useful policy training run.
 
@@ -460,4 +464,28 @@ cd /root/autodl-tmp/nanotron-smolvla-project
 bash scripts/run_pusht_pp1_2pp_autodl.sh configs/smolvla_pusht_pp1_2pp_50step_autodl.yaml
 bash scripts/run_pusht_pp1_2pp_autodl.sh configs/smolvla_pusht_pp1_2pp_50step_ckpt_autodl.yaml
 bash scripts/run_pusht_pp1_2pp_autodl.sh configs/smolvla_pusht_pp1_2pp_resume_autodl.yaml
+```
+## Verified Stage TP+PP result
+
+The first combined tensor-parallel and pipeline-parallel smoke was verified on the four-GPU AutoDL CUDA 13 instance with `dp=1,tp=2,pp=2`. This uses expert-only tensor parallelism inside each PP stage and Nanotron PP communication between the two layer ranges.
+
+Before the run, old generated checkpoints were cleaned from AutoDL, reducing `/root/autodl-tmp` usage from 82% to 67%. The final smoke ended with about 66% data disk usage.
+
+```text
+Nanotron-SmVLA training: data=lerobot dp=1, tp=2, pp=2, params=220,290,336, trainable=7,777,632, expert_tp=True
+step=1 loss=1.368408
+step=2 loss=1.368208
+step=3 loss=1.328564
+step=4 loss=1.536479
+step=5 loss=1.289939
+EXIT_CODE:0
+wandb: train/samples_seen 5
+wandb: system/disk_used_percent 65.64429
+```
+
+Run command:
+
+```bash
+cd /root/autodl-tmp/nanotron-smolvla-project
+bash scripts/run_pusht_2tp_2pp_autodl.sh configs/smolvla_pusht_2tp_2pp_autodl.yaml
 ```

@@ -174,13 +174,10 @@ def main() -> None:
 
     if cfg.parallelism.pp not in (1, 2):
         raise ValueError("SmolVLA PP support currently allows pp=1 or the PP1 smoke path pp=2.")
-    if cfg.parallelism.pp == 2:
-        if cfg.parallelism.tp != 1:
-            raise ValueError("PP1 currently supports pp=2,tp=1 only. Add TP after the PP boundary is stable.")
-        if cfg.model.expert_tensor_parallel:
-            raise ValueError("PP1 currently requires model.expert_tensor_parallel=false.")
+    if cfg.parallelism.pp == 2 and cfg.parallelism.tp not in (1, 2):
+        raise ValueError("PP1/TP+PP smoke paths currently support pp=2 with tp=1 or tp=2.")
     if cfg.parallelism.tp != 1 and not cfg.model.expert_tensor_parallel:
-        raise ValueError("tp>1 requires model.expert_tensor_parallel=true for the TP1 expert-only path.")
+        raise ValueError("tp>1 requires model.expert_tensor_parallel=true for the expert-only TP path.")
     parallel_context = ParallelContext(
         tensor_parallel_size=cfg.parallelism.tp,
         pipeline_parallel_size=cfg.parallelism.pp,
