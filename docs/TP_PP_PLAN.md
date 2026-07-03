@@ -69,14 +69,11 @@ Validation ladder:
 
 ## Stage TP2: 2DP x 2TP
 
-Goal: verify `dp=2,tp=2,pp=1` on four GPUs.
+Goal: verify `dp=2,tp=2,pp=1` on four GPUs. Verified on AutoDL with 50-step checkpoint/resume.
 
-The current DP synchronization must skip TP-sharded parameters or synchronize them only across each parameter's DP replica group. This means the trainable parameter sync code needs to distinguish:
+Nanotron groups DP ranks by matching TP shard for `dp=2,tp=2,pp=1`, so the current DP synchronization averages each parameter shard across its DP replica group. The 4-GPU validation saved and resumed rank-local TP checkpoint shards successfully.
 
-- replicated parameters, synchronized over DP
-- TP-sharded parameters, synchronized across matching TP ranks within DP groups
-
-Nanotron's own sharded parameter metadata should be used here instead of name-based rules.
+A future cleanup can reduce checkpoint duplication by saving one shard per TP rank instead of one file per world rank, but the current format is simple and robust for resume.
 
 ## Stage PP0: pipeline split design
 

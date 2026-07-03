@@ -8,6 +8,7 @@ This repository contains a minimal but structured bridge for training LeRobot Sm
 - Stage B: Add a real `LeRobotDataset` backend and verify single-GPU training on the PushT dataset.
 - Stage D: Verify 2-way data parallel training on one 2-GPU AutoDL instance.
 - Stage TP1: Verify expert-only 2-way tensor parallel training on one 2-GPU AutoDL instance.
+- Stage TP2: Verify combined 2DP x 2TP expert-only training on one 4-GPU AutoDL instance.
 
 The active project code lives in `nanotron_smolvla/`.
 The original prototype is preserved under `archive/initial_smolvla_nanotron_smoke/` for historical reference only.
@@ -26,11 +27,14 @@ configs/
   smolvla_pusht_2dp_autodl.yaml
   smolvla_pusht_2tp_autodl.yaml
   smolvla_pusht_2tp_resume_autodl.yaml
+  smolvla_pusht_2dp_2tp_autodl.yaml
+  smolvla_pusht_2dp_2tp_resume_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
   run_pusht_2dp_autodl.sh
   run_pusht_2tp_autodl.sh
+  run_pusht_2dp_2tp_autodl.sh
   inspect_smolvla_topology.py
 docs/
   TP_PP_PLAN.md
@@ -299,4 +303,53 @@ checkpoint_resumed path=outputs/pusht_2tp/step_000050.pt step=50
 step=51 loss=0.690763
 step=52 loss=0.956361
 wandb: system/disk_used_percent 71.26103
+```
+
+## Verified Stage TP2 result
+
+Combined data parallel and tensor parallel training was verified on a four-GPU AutoDL CUDA 13 instance with `dp=2,tp=2,pp=1`. Nanotron groups DP ranks by matching TP shard, so DP gradient synchronization averages rank pairs that own the same expert shard.
+
+The 5-step smoke produced:
+
+```text
+Nanotron-SmVLA training: data=lerobot dp=2, tp=2, pp=1, params=220,290,336, trainable=7,777,632, expert_tp=True
+step=1 loss=1.406795
+step=2 loss=1.425695
+step=3 loss=1.378253
+step=4 loss=1.493057
+step=5 loss=1.241209
+wandb: train/samples_seen 10
+```
+
+The 50-step run with checkpointing produced:
+
+```text
+step=25 loss=1.032271
+checkpoint_saved path=outputs/pusht_2dp_2tp/step_000025.pt
+checkpoint_saved_tp_shards pattern=step_000025_rank_*.pt
+...
+step=50 loss=1.096941
+checkpoint_saved path=outputs/pusht_2dp_2tp/step_000050.pt
+checkpoint_saved_tp_shards pattern=step_000050_rank_*.pt
+wandb: train/samples_seen 100
+wandb: system/disk_used_percent 74.9023
+```
+
+The four rank-local checkpoint shards were created as expected:
+
+```text
+outputs/pusht_2dp_2tp/step_000050_rank_000.pt 450M
+outputs/pusht_2dp_2tp/step_000050_rank_001.pt 450M
+outputs/pusht_2dp_2tp/step_000050_rank_002.pt 450M
+outputs/pusht_2dp_2tp/step_000050_rank_003.pt 450M
+```
+
+The resume config loaded `outputs/pusht_2dp_2tp/step_000050.pt`, which resolves to each world rank's shard file, then continued training:
+
+```text
+checkpoint_resumed path=outputs/pusht_2dp_2tp/step_000050.pt step=50
+step=51 loss=0.727421
+step=52 loss=1.068907
+wandb: train/samples_seen 104
+wandb: system/disk_used_percent 78.292
 ```
