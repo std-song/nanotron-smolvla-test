@@ -35,6 +35,7 @@ class SmolVLAModelConfig:
     device: str = "cuda"
     compile_model: bool = False
     expert_tensor_parallel: bool = False
+    pipeline_split_layer: int | None = None
 
     # Generic Nanotron paths expect these attributes to exist.
     vocab_size: int = 1

@@ -445,6 +445,128 @@ class SmolVLALossModule(nn.Module):
         denom = (valid.sum() * losses.shape[-1]).clamp_min(1)
         return {"loss": ((losses * valid).sum() / denom).float()}
 
+
+class SmolVLAPPStage0Module(nn.Module):
+    """First PP stage: flow sampling, input embedding, and early VLM/expert layers."""
+
+    def __init__(self, config: SmolVLAModelConfig, parallel_context: ParallelContext | None = None):
+        super().__init__()
+        self.loss_module = SmolVLALossModule(config, parallel_context)
+        self.split_layer = config.pipeline_split_layer or max(1, config.num_vlm_layers // 2)
+        if not 0 < self.split_layer < config.num_vlm_layers:
+            raise ValueError(
+                f"pipeline_split_layer must be in [1, {config.num_vlm_layers - 1}] for pp=2; "
+                f"got {self.split_layer}"
+            )
+
+    def forward(
+        self,
+        image: torch.Tensor,
+        image_mask: torch.Tensor,
+        language_tokens: torch.Tensor,
+        language_attention_mask: torch.Tensor,
+        state: torch.Tensor,
+        action: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        model_dtype = next(self.loss_module.model.parameters()).dtype
+        state = state.to(dtype=model_dtype)
+        action = action.to(dtype=model_dtype)
+        with torch.autocast(
+            device_type="cuda",
+            dtype=model_dtype,
+            enabled=model_dtype in (torch.float16, torch.bfloat16),
+        ):
+            x_t, u_t, time = self.loss_module._sample_flow_inputs(action)
+            (
+                prefix_embs,
+                prefix_pad_masks,
+                prefix_att_masks,
+                suffix_embs,
+                suffix_pad_masks,
+                suffix_att_masks,
+            ) = self.loss_module._embed_training_inputs(
+                image,
+                image_mask,
+                language_tokens,
+                language_attention_mask,
+                state,
+                x_t,
+                time,
+            )
+            attention_mask, position_ids = self.loss_module._build_attention_inputs(
+                prefix_pad_masks,
+                prefix_att_masks,
+                suffix_pad_masks,
+                suffix_att_masks,
+            )
+            prefix_embs, suffix_embs = run_vlm_with_expert_layer_range(
+                self.loss_module.model.vlm_with_expert,
+                inputs_embeds=[prefix_embs, suffix_embs],
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=None,
+                use_cache=False,
+                fill_kv_cache=False,
+                layer_start=0,
+                layer_end=self.split_layer,
+                apply_final_norm=False,
+            )[0]
+        return {
+            "prefix_embs": prefix_embs,
+            "suffix_embs": suffix_embs,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "u_t": u_t,
+        }
+
+
+class SmolVLAPPStage1Module(nn.Module):
+    """Second PP stage: late VLM/expert layers, final norm, and flow loss."""
+
+    def __init__(self, config: SmolVLAModelConfig, parallel_context: ParallelContext | None = None):
+        super().__init__()
+        self.loss_module = SmolVLALossModule(config, parallel_context)
+        self.split_layer = config.pipeline_split_layer or max(1, config.num_vlm_layers // 2)
+        if not 0 < self.split_layer < config.num_vlm_layers:
+            raise ValueError(
+                f"pipeline_split_layer must be in [1, {config.num_vlm_layers - 1}] for pp=2; "
+                f"got {self.split_layer}"
+            )
+
+    def forward(
+        self,
+        prefix_embs: torch.Tensor,
+        suffix_embs: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        u_t: torch.Tensor,
+        action_is_pad: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        model_dtype = next(self.loss_module.model.parameters()).dtype
+        with torch.autocast(
+            device_type="cuda",
+            dtype=model_dtype,
+            enabled=model_dtype in (torch.float16, torch.bfloat16),
+        ):
+            (_, suffix_out), _ = run_vlm_with_expert_layer_range(
+                self.loss_module.model.vlm_with_expert,
+                inputs_embeds=[prefix_embs, suffix_embs],
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=None,
+                use_cache=False,
+                fill_kv_cache=False,
+                layer_start=self.split_layer,
+                layer_end=None,
+                apply_final_norm=True,
+            )
+            suffix_out = suffix_out[:, -self.loss_module.model.config.chunk_size :]
+            losses = self.loss_module._compute_flow_loss(suffix_out, u_t)
+        valid = (~action_is_pad).unsqueeze(-1)
+        denom = (valid.sum() * losses.shape[-1]).clamp_min(1)
+        return {"loss": ((losses * valid).sum() / denom).float()}
+
+
 class SmolVLANanotronModel(NanotronModel):
     def __init__(
         self,
@@ -458,22 +580,59 @@ class SmolVLANanotronModel(NanotronModel):
         self.parallel_context = parallel_context
         self.parallel_config = parallel_config
         self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+        self.use_pipeline_split = parallel_context.pp_pg.size() > 1
 
-        self.loss = PipelineBlock(
-            p2p=self.p2p,
-            module_builder=SmolVLALossModule,
-            module_kwargs={"config": config, "parallel_context": parallel_context},
-            module_input_keys={
-                "image",
-                "image_mask",
-                "language_tokens",
-                "language_attention_mask",
-                "state",
-                "action",
-                "action_is_pad",
-            },
-            module_output_keys={"loss"},
-        )
+        if self.use_pipeline_split:
+            self.stage0 = PipelineBlock(
+                p2p=self.p2p,
+                module_builder=SmolVLAPPStage0Module,
+                module_kwargs={"config": config, "parallel_context": parallel_context},
+                module_input_keys={
+                    "image",
+                    "image_mask",
+                    "language_tokens",
+                    "language_attention_mask",
+                    "state",
+                    "action",
+                },
+                module_output_keys={
+                    "prefix_embs",
+                    "suffix_embs",
+                    "attention_mask",
+                    "position_ids",
+                    "u_t",
+                },
+            )
+            self.stage1 = PipelineBlock(
+                p2p=self.p2p,
+                module_builder=SmolVLAPPStage1Module,
+                module_kwargs={"config": config, "parallel_context": parallel_context},
+                module_input_keys={
+                    "prefix_embs",
+                    "suffix_embs",
+                    "attention_mask",
+                    "position_ids",
+                    "u_t",
+                    "action_is_pad",
+                },
+                module_output_keys={"loss"},
+            )
+        else:
+            self.loss = PipelineBlock(
+                p2p=self.p2p,
+                module_builder=SmolVLALossModule,
+                module_kwargs={"config": config, "parallel_context": parallel_context},
+                module_input_keys={
+                    "image",
+                    "image_mask",
+                    "language_tokens",
+                    "language_attention_mask",
+                    "state",
+                    "action",
+                    "action_is_pad",
+                },
+                module_output_keys={"loss"},
+            )
 
     def forward(
         self,
@@ -485,6 +644,17 @@ class SmolVLANanotronModel(NanotronModel):
         action: Union[torch.Tensor, TensorPointer],
         action_is_pad: Union[torch.Tensor, TensorPointer],
     ) -> dict[str, Union[torch.Tensor, TensorPointer]]:
+        if self.use_pipeline_split:
+            hidden = self.stage0(
+                image=image,
+                image_mask=image_mask,
+                language_tokens=language_tokens,
+                language_attention_mask=language_attention_mask,
+                state=state,
+                action=action,
+            )
+            hidden["action_is_pad"] = action_is_pad
+            return self.stage1(**hidden)
         return self.loss(
             image=image,
             image_mask=image_mask,
@@ -501,7 +671,7 @@ class SmolVLANanotronModel(NanotronModel):
         return None
 
     def get_block_compute_costs(self):
-        return {SmolVLALossModule: 1}
+        return {SmolVLALossModule: 1, SmolVLAPPStage0Module: 2, SmolVLAPPStage1Module: 1}
 
     def get_flops_per_sec(self, iteration_time_in_sec, sequence_length, global_batch_size):
         return 0.0, 0.0

@@ -68,6 +68,32 @@ def _finish_tracker(run) -> None:
 
 
 
+def _with_pp_tensor_pointers(data_iter, parallel_context, dist_module):
+    if parallel_context.pp_pg.size() == 1:
+        return data_iter
+
+    from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
+
+    pp_rank = dist_module.get_rank(parallel_context.pp_pg)
+    input_pp_rank = 0
+    output_pp_rank = parallel_context.pp_pg.size() - 1
+    input_keys = {"image", "image_mask", "language_tokens", "language_attention_mask", "state", "action"}
+    output_keys = {"action_is_pad"}
+
+    def iterator():
+        for batch in data_iter:
+            routed = {}
+            for key, value in batch.items():
+                if key in input_keys:
+                    routed[key] = value if pp_rank == input_pp_rank else TensorPointer(group_rank=input_pp_rank)
+                elif key in output_keys:
+                    routed[key] = value if pp_rank == output_pp_rank else TensorPointer(group_rank=output_pp_rank)
+                else:
+                    routed[key] = value
+            yield routed
+
+    return iterator()
+
 def _sync_trainable_gradients_across_dp(trainable_params: list[torch.nn.Parameter], dp_pg, dist_module) -> None:
     for param in trainable_params:
         if param.grad is None:
@@ -146,8 +172,15 @@ def main() -> None:
     torch.manual_seed(cfg.seed)
     torch.cuda.manual_seed_all(cfg.seed)
 
-    if cfg.parallelism.pp != 1:
-        raise ValueError("Pipeline parallelism is not implemented for SmolVLA yet; use pp=1.")
+    if cfg.parallelism.pp not in (1, 2):
+        raise ValueError("SmolVLA PP support currently allows pp=1 or the PP1 smoke path pp=2.")
+    if cfg.parallelism.pp == 2:
+        if cfg.parallelism.tp != 1:
+            raise ValueError("PP1 currently supports pp=2,tp=1 only. Add TP after the PP boundary is stable.")
+        if cfg.model.expert_tensor_parallel:
+            raise ValueError("PP1 currently requires model.expert_tensor_parallel=false.")
+        if cfg.checkpoint.output_dir and cfg.checkpoint.save_every:
+            raise ValueError("PP checkpoint sharding is not implemented yet; disable checkpoint.save_every for PP1 smoke.")
     if cfg.parallelism.tp != 1 and not cfg.model.expert_tensor_parallel:
         raise ValueError("tp>1 requires model.expert_tensor_parallel=true for the TP1 expert-only path.")
     parallel_context = ParallelContext(
@@ -168,7 +201,7 @@ def main() -> None:
         ),
         parallel_context=parallel_context,
         dtype=getattr(torch, cfg.dtype),
-        target_pp_ranks=[0],
+        target_pp_ranks=None if cfg.parallelism.pp > 1 else [0],
         device=device,
     )
     convert_parameters_to_nanotron(model)
@@ -203,6 +236,7 @@ def main() -> None:
         data_rank=dp_rank,
         data_world_size=dp_size,
     )
+    data_iter = _with_pp_tensor_pointers(data_iter, parallel_context, dist)
     pipeline_engine = AllForwardAllBackwardPipelineEngine()
     is_rank0 = dist.get_rank(parallel_context.world_pg) == 0
     tracker = _init_tracker(cfg, is_rank0)
@@ -238,7 +272,13 @@ def main() -> None:
                 grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, float(cfg.optimizer.clip_grad))
             optimizer.step()
 
-            loss = torch.stack([out["loss"] for out in outputs]).sum().detach()
+            local_losses = [out["loss"] for out in outputs if isinstance(out["loss"], torch.Tensor)]
+            if local_losses:
+                loss = torch.stack(local_losses).sum().detach()
+            else:
+                loss = torch.zeros((), device=device, dtype=torch.float32)
+            if parallel_context.pp_pg.size() > 1:
+                dist.all_reduce(loss, group=parallel_context.pp_pg, op=dist.ReduceOp.SUM)
             if parallel_context.dp_pg.size() > 1:
                 dist.all_reduce(loss, group=parallel_context.dp_pg, op=dist.ReduceOp.AVG)
 
