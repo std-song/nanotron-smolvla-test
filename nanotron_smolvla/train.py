@@ -137,9 +137,10 @@ def main() -> None:
     torch.manual_seed(cfg.seed)
     torch.cuda.manual_seed_all(cfg.seed)
 
-    if cfg.parallelism.tp != 1 or cfg.parallelism.pp != 1:
-        raise ValueError("Stage A/B supports tp=1 and pp=1 only. Later stages will split SmolVLA for TP/PP.")
-
+    if cfg.parallelism.pp != 1:
+        raise ValueError("Pipeline parallelism is not implemented for SmolVLA yet; use pp=1.")
+    if cfg.parallelism.tp != 1 and not cfg.model.expert_tensor_parallel:
+        raise ValueError("tp>1 requires model.expert_tensor_parallel=true for the TP1 expert-only path.")
     parallel_context = ParallelContext(
         tensor_parallel_size=cfg.parallelism.tp,
         pipeline_parallel_size=cfg.parallelism.pp,
@@ -203,7 +204,7 @@ def main() -> None:
         print(
             f"Nanotron-SmVLA training: data={cfg.data.kind} "
             f"dp={dp_size}, tp={cfg.parallelism.tp}, pp={cfg.parallelism.pp}, "
-            f"params={local_params:,}, trainable={trainable:,}"
+            f"params={local_params:,}, trainable={trainable:,}, expert_tp={cfg.model.expert_tensor_parallel}"
         )
         if resume_path is not None:
             print(f"checkpoint_resumed path={resume_path} step={start_step}")

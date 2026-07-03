@@ -54,7 +54,7 @@ Goal: verify `dp=1,tp=2,pp=1` while keeping the frozen VLM path replicated.
 Planned scope:
 
 - Require `train_expert_only=True` for the first TP implementation.
-- Replace trainable expert-layer attention and MLP linears with Nanotron TP linears.
+- Replace trainable expert-layer attention and MLP linears with project-local TP shims first, then migrate the shims toward native Nanotron TP layers once the SmolVLA attention path is head-local.
 - Keep action/state projection layers replicated.
 - Keep vision encoder, connector, language embeddings, and frozen VLM text layers replicated.
 - Load full checkpoint weights on each TP rank, then copy the local shard into each TP module.
@@ -64,7 +64,7 @@ Validation ladder:
 
 1. `tp=1` equivalence smoke: replacement path enabled but TP size is 1.
 2. `tp=2` dummy smoke: 2 steps, no PushT data dependency.
-3. `tp=2` PushT smoke: 5 steps.
+3. `tp=2` PushT smoke: 5 steps. Verified on AutoDL with `configs/smolvla_pusht_2tp_autodl.yaml`.
 4. `tp=2` PushT stability: 50 steps plus checkpoint save/resume.
 
 ## Stage TP2: 2DP x 2TP

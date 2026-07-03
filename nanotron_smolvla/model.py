@@ -3,16 +3,44 @@ from __future__ import annotations
 from typing import Union
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
+from nanotron import distributed as dist
 from nanotron.models import NanotronModel
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import NanotronParameter
 from nanotron.parallel.pipeline_parallel.block import PipelineBlock
 from nanotron.parallel.pipeline_parallel.p2p import P2P
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
+from nanotron.parallel.sharded_parameters import SplitConfig, create_sharded_parameter_from_config
+from nanotron.parallel.tensor_parallel.distributed_differentiable_primitives import differentiable_all_reduce_sum
 
 from .config import SmolVLAModelConfig
+
+
+class _AllGatherLastDim(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, pg) -> torch.Tensor:
+        ctx.pg = pg
+        ctx.rank = dist.get_rank(pg)
+        ctx.world_size = pg.size()
+        if ctx.world_size == 1:
+            return tensor
+        chunks = [torch.empty_like(tensor) for _ in range(ctx.world_size)]
+        dist.all_gather(chunks, tensor.contiguous(), group=pg)
+        return torch.cat(chunks, dim=-1)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        if ctx.world_size == 1:
+            return grad_output, None
+        local = grad_output.chunk(ctx.world_size, dim=-1)[ctx.rank].contiguous()
+        return local, None
+
+
+def _all_gather_last_dim(tensor: torch.Tensor, pg) -> torch.Tensor:
+    return _AllGatherLastDim.apply(tensor, pg)
 
 
 def convert_parameters_to_nanotron(module: nn.Module) -> None:
@@ -29,8 +57,129 @@ def convert_parameters_to_nanotron(module: nn.Module) -> None:
             child._parameters[name] = memo[param_id]
 
 
+class GatheredColumnParallelLinear(nn.Module):
+    """Shard a linear layer's output dimension, then gather the full output for legacy SmolVLA code."""
+
+    def __init__(self, source: nn.Linear, pg):
+        super().__init__()
+        self.pg = pg
+        self.rank = dist.get_rank(pg)
+        self.world_size = pg.size()
+        if source.out_features % self.world_size != 0:
+            raise ValueError(f"out_features={source.out_features} must be divisible by tp={self.world_size}")
+        self.in_features = source.in_features
+        self.out_features = source.out_features
+        self.local_out_features = source.out_features // self.world_size
+        self.weight = nn.Parameter(
+            torch.empty(
+                self.local_out_features,
+                source.in_features,
+                device=source.weight.device,
+                dtype=source.weight.dtype,
+            ),
+            requires_grad=source.weight.requires_grad,
+        )
+        if source.bias is None:
+            self.bias = None
+        else:
+            self.bias = nn.Parameter(
+                torch.empty(self.local_out_features, device=source.bias.device, dtype=source.bias.dtype),
+                requires_grad=source.bias.requires_grad,
+            )
+        with torch.no_grad():
+            start = self.rank * self.local_out_features
+            end = start + self.local_out_features
+            self.weight.copy_(source.weight[start:end])
+            if self.bias is not None:
+                self.bias.copy_(source.bias[start:end])
+        split_config = SplitConfig(split_dim=0)
+        self.weight = create_sharded_parameter_from_config(self.weight, pg=pg, split_config=split_config)
+        if self.bias is not None:
+            self.bias = create_sharded_parameter_from_config(self.bias, pg=pg, split_config=SplitConfig(split_dim=0))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        local = F.linear(x, self.weight, self.bias)
+        return _all_gather_last_dim(local, self.pg).clone()
+
+
+class SlicedInputRowParallelLinear(nn.Module):
+    """Shard a linear layer's input dimension and all-reduce the partial outputs."""
+
+    def __init__(self, source: nn.Linear, pg):
+        super().__init__()
+        self.pg = pg
+        self.rank = dist.get_rank(pg)
+        self.world_size = pg.size()
+        if source.in_features % self.world_size != 0:
+            raise ValueError(f"in_features={source.in_features} must be divisible by tp={self.world_size}")
+        self.in_features = source.in_features
+        self.out_features = source.out_features
+        self.local_in_features = source.in_features // self.world_size
+        self.weight = nn.Parameter(
+            torch.empty(
+                source.out_features,
+                self.local_in_features,
+                device=source.weight.device,
+                dtype=source.weight.dtype,
+            ),
+            requires_grad=source.weight.requires_grad,
+        )
+        # None of the current expert row-parallel targets use bias, but keep the general case correct.
+        if source.bias is not None and self.rank == 0:
+            self.bias = nn.Parameter(source.bias.detach().clone(), requires_grad=source.bias.requires_grad)
+        else:
+            self.bias = None
+        with torch.no_grad():
+            start = self.rank * self.local_in_features
+            end = start + self.local_in_features
+            self.weight.copy_(source.weight[:, start:end])
+        self.weight = create_sharded_parameter_from_config(self.weight, pg=pg, split_config=SplitConfig(split_dim=1))
+        if self.bias is not None:
+            self.bias = NanotronParameter(self.bias, requires_grad=self.bias.requires_grad)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        start = self.rank * self.local_in_features
+        end = start + self.local_in_features
+        out = F.linear(x[..., start:end], self.weight, self.bias)
+        if self.world_size > 1:
+            out = differentiable_all_reduce_sum(out, group=self.pg).clone()
+        return out
+
+
+def _set_child_module(root: nn.Module, name: str, module: nn.Module) -> None:
+    parent = root
+    parts = name.split(".")
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    setattr(parent, parts[-1], module)
+
+
+def enable_expert_tensor_parallel(model: nn.Module, tp_pg) -> int:
+    """Replace trainable SmolVLA expert linears with TP shims that preserve full hidden shapes."""
+
+    if tp_pg.size() == 1:
+        return 0
+    expert = model.vlm_with_expert.lm_expert
+    replaced = 0
+    for name, child in list(expert.named_modules()):
+        if not isinstance(child, nn.Linear):
+            continue
+        if not any(param.requires_grad for param in child.parameters(recurse=False)):
+            continue
+        leaf = name.rsplit(".", 1)[-1]
+        if leaf in {"q_proj", "k_proj", "v_proj", "gate_proj", "up_proj"}:
+            replacement = GatheredColumnParallelLinear(child, tp_pg)
+        elif leaf in {"o_proj", "down_proj"}:
+            replacement = SlicedInputRowParallelLinear(child, tp_pg)
+        else:
+            continue
+        _set_child_module(expert, name, replacement)
+        replaced += 1
+    return replaced
+
+
 class SmolVLALossModule(nn.Module):
-    def __init__(self, config: SmolVLAModelConfig):
+    def __init__(self, config: SmolVLAModelConfig, parallel_context: ParallelContext | None = None):
         super().__init__()
 
         from lerobot.configs import FeatureType, PolicyFeature
@@ -70,6 +219,13 @@ class SmolVLALossModule(nn.Module):
         )
         smolvla_config.validate_features()
         self.model = VLAFlowMatching(smolvla_config)
+        self.tp_replaced_linears = 0
+        if config.expert_tensor_parallel:
+            if parallel_context is None:
+                raise ValueError("expert_tensor_parallel requires a ParallelContext")
+            if not config.train_expert_only:
+                raise ValueError("expert_tensor_parallel currently requires train_expert_only=true")
+            self.tp_replaced_linears = enable_expert_tensor_parallel(self.model, parallel_context.tp_pg)
 
     def forward(
         self,
@@ -119,7 +275,7 @@ class SmolVLANanotronModel(NanotronModel):
         self.loss = PipelineBlock(
             p2p=self.p2p,
             module_builder=SmolVLALossModule,
-            module_kwargs={"config": config},
+            module_kwargs={"config": config, "parallel_context": parallel_context},
             module_input_keys={
                 "image",
                 "image_mask",

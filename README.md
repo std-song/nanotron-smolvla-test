@@ -7,6 +7,7 @@ This repository contains a minimal but structured bridge for training LeRobot Sm
 - Stage A: Refactor the original smoke test into a small Python project.
 - Stage B: Add a real `LeRobotDataset` backend and verify single-GPU training on the PushT dataset.
 - Stage D: Verify 2-way data parallel training on one 2-GPU AutoDL instance.
+- Stage TP1: Verify expert-only 2-way tensor parallel training on one 2-GPU AutoDL instance.
 
 The active project code lives in `nanotron_smolvla/`.
 The original prototype is preserved under `archive/initial_smolvla_nanotron_smoke/` for historical reference only.
@@ -23,10 +24,12 @@ configs/
   smolvla_dummy_1gpu.yaml
   smolvla_pusht_1gpu_autodl.yaml
   smolvla_pusht_2dp_autodl.yaml
+  smolvla_pusht_2tp_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
   run_pusht_2dp_autodl.sh
+  run_pusht_2tp_autodl.sh
   inspect_smolvla_topology.py
 docs/
   TP_PP_PLAN.md
@@ -245,3 +248,22 @@ python scripts/inspect_smolvla_topology.py \
   --max-lines 300
 ```
 
+## Verified Stage TP1 result
+
+Expert-only tensor parallel training was verified on the same two-GPU AutoDL CUDA 13 instance with `dp=1,tp=2,pp=1`. The first TP implementation shards trainable expert `nn.Linear` weights while preserving full SmolVLA hidden shapes for the existing LeRobot forward path.
+
+```text
+Nanotron-SmVLA training: data=lerobot dp=1, tp=2, pp=1, params=220,290,336, trainable=7,777,632, expert_tp=True
+step=1 loss=1.368408
+step=2 loss=1.368272
+step=3 loss=1.324518
+step=4 loss=1.532223
+step=5 loss=1.279573
+wandb: Run summary:
+wandb: system/disk_used_percent 67.74519
+wandb: train/grad_norm 8.0625
+wandb: train/loss 1.27957
+wandb: train/samples_seen 5
+```
+
+The W&B offline run was written to `/root/autodl-tmp/nanotron-smolvla-project/wandb/wandb/offline-run-20260703_102901-zrhjfdk0`.

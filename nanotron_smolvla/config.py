@@ -34,6 +34,7 @@ class SmolVLAModelConfig:
     image_shape: tuple[int, int, int] = (3, 512, 512)
     device: str = "cuda"
     compile_model: bool = False
+    expert_tensor_parallel: bool = False
 
     # Generic Nanotron paths expect these attributes to exist.
     vocab_size: int = 1
