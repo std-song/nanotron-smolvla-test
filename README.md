@@ -39,6 +39,9 @@ configs/
   smolvla_pusht_pp1_2pp_50step_ckpt_autodl.yaml
   smolvla_pusht_pp1_2pp_resume_autodl.yaml
   smolvla_pusht_2tp_2pp_autodl.yaml
+  smolvla_pusht_2tp_2pp_50step_autodl.yaml
+  smolvla_pusht_2tp_2pp_50step_ckpt_autodl.yaml
+  smolvla_pusht_2tp_2pp_resume_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
@@ -488,4 +491,57 @@ Run command:
 ```bash
 cd /root/autodl-tmp/nanotron-smolvla-project
 bash scripts/run_pusht_2tp_2pp_autodl.sh configs/smolvla_pusht_2tp_2pp_autodl.yaml
+```
+## Verified Stage TP+PP stability and checkpoint result
+
+The combined `dp=1,tp=2,pp=2` path was extended to 50 PushT steps on the four-GPU AutoDL CUDA 13 instance:
+
+```text
+step=25 loss=0.966728
+...
+step=50 loss=1.171424
+EXIT_CODE:0
+wandb: train/samples_seen 50
+wandb: system/disk_used_percent 65.64467
+```
+
+Checkpointing was verified with rank-local shards because TP and PP both shard model ownership. The checkpoint config saved steps 25 and 50:
+
+```text
+checkpoint_saved path=outputs/pusht_2tp_2pp/step_000025.pt
+checkpoint_saved_rank_shards pattern=step_000025_rank_*.pt
+checkpoint_saved path=outputs/pusht_2tp_2pp/step_000050.pt
+checkpoint_saved_rank_shards pattern=step_000050_rank_*.pt
+```
+
+The verified shard files were:
+
+```text
+outputs/pusht_2tp_2pp/step_000025_rank_000.pt 421M
+outputs/pusht_2tp_2pp/step_000025_rank_001.pt 421M
+outputs/pusht_2tp_2pp/step_000025_rank_002.pt 421M
+outputs/pusht_2tp_2pp/step_000025_rank_003.pt 421M
+outputs/pusht_2tp_2pp/step_000050_rank_000.pt 421M
+outputs/pusht_2tp_2pp/step_000050_rank_001.pt 421M
+outputs/pusht_2tp_2pp/step_000050_rank_002.pt 421M
+outputs/pusht_2tp_2pp/step_000050_rank_003.pt 421M
+```
+
+The resume config loaded `outputs/pusht_2tp_2pp/step_000050.pt`, which resolves to each world rank's local shard, then continued training:
+
+```text
+checkpoint_resumed path=outputs/pusht_2tp_2pp/step_000050.pt step=50
+step=51 loss=0.691958
+step=52 loss=1.039523
+EXIT_CODE:0
+wandb: system/disk_used_percent 72.21199
+```
+
+Run commands:
+
+```bash
+cd /root/autodl-tmp/nanotron-smolvla-project
+bash scripts/run_pusht_2tp_2pp_autodl.sh configs/smolvla_pusht_2tp_2pp_50step_autodl.yaml
+bash scripts/run_pusht_2tp_2pp_autodl.sh configs/smolvla_pusht_2tp_2pp_50step_ckpt_autodl.yaml
+bash scripts/run_pusht_2tp_2pp_autodl.sh configs/smolvla_pusht_2tp_2pp_resume_autodl.yaml
 ```
