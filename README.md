@@ -10,6 +10,7 @@ This repository contains a minimal but structured bridge for training LeRobot Sm
 - Stage TP1: Verify expert-only 2-way tensor parallel training on one 2-GPU AutoDL instance.
 - Stage TP2: Verify combined 2DP x 2TP expert-only training on one 4-GPU AutoDL instance.
 - Stage PP0: Refactor SmolVLA training forward into pipeline-ready pieces while preserving pp=1 behavior.
+- Stage PP1: Verify 2-stage pipeline parallel training, checkpoint save, and checkpoint resume on a 4-GPU AutoDL instance using 2 GPUs.
 
 The active project code lives in `nanotron_smolvla/`.
 The original prototype is preserved under `archive/initial_smolvla_nanotron_smoke/` for historical reference only.
@@ -32,12 +33,17 @@ configs/
   smolvla_pusht_2dp_2tp_resume_autodl.yaml
   smolvla_pusht_pp0_1gpu_autodl.yaml
   smolvla_pusht_pp0_2tp_autodl.yaml
+  smolvla_pusht_pp1_2pp_autodl.yaml
+  smolvla_pusht_pp1_2pp_50step_autodl.yaml
+  smolvla_pusht_pp1_2pp_50step_ckpt_autodl.yaml
+  smolvla_pusht_pp1_2pp_resume_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
   run_pusht_2dp_autodl.sh
   run_pusht_2tp_autodl.sh
   run_pusht_2dp_2tp_autodl.sh
+  run_pusht_pp1_2pp_autodl.sh
   inspect_smolvla_topology.py
 docs/
   TP_PP_PLAN.md
@@ -139,7 +145,8 @@ wandb sync /root/autodl-tmp/nanotron-smolvla-project/wandb/offline-run-YYYYMMDD_
 ## Important limitations
 
 - Stage A-C supports `dp=1,tp=1,pp=1`; Stage D verifies `dp=2,tp=1,pp=1`.
-- Tensor parallel and pipeline parallel are not implemented inside SmolVLA yet.
+- Expert-only TP is verified for `dp=1,tp=2,pp=1` and `dp=2,tp=2,pp=1`.
+- PP1 is verified for `dp=1,tp=1,pp=2`; TP+PP composition is still the next stage.
 - The model uses a reduced SmolVLM backbone (`num_vlm_layers=2`) for fast smoke tests.
 - The PushT run is a framework/data-path validation, not a useful policy training run.
 
@@ -381,4 +388,76 @@ step=2 loss=1.368272
 step=3 loss=1.324518
 step=4 loss=1.532223
 step=5 loss=1.279573
+```
+
+## Verified Stage PP1 result
+
+PP1 splits the two-layer SmolVLA smoke backbone into two Nanotron `PipelineBlock`s. Stage 0 performs flow input sampling, prefix/suffix embedding, attention mask construction, and layer range `[0, 1)`. Stage 1 receives the hidden states through Nanotron PP communication, runs layer range `[1, end)`, applies final norms, and computes the flow-matching loss.
+
+The 5-step smoke was verified on the four-GPU AutoDL CUDA 13 instance using two RTX 3090 GPUs:
+
+```text
+Nanotron-SmVLA training: data=lerobot dp=1, tp=1, pp=2, params=226,429,216, trainable=13,916,512, expert_tp=False
+step=1 loss=1.369288
+step=2 loss=1.393000
+step=3 loss=1.330252
+step=4 loss=1.538532
+step=5 loss=1.261307
+```
+
+Run command:
+
+```bash
+cd /root/autodl-tmp/nanotron-smolvla-project
+bash scripts/run_pusht_pp1_2pp_autodl.sh configs/smolvla_pusht_pp1_2pp_autodl.yaml
+```
+
+## Verified Stage PP1 stability and checkpoint result
+
+The 50-step PP1 stability config completed successfully:
+
+```text
+step=25 loss=0.979418
+...
+step=50 loss=1.160684
+EXIT_CODE:0
+wandb: train/samples_seen 50
+wandb: system/disk_used_percent 78.29293
+```
+
+PP checkpointing saves rank-local shards, because each pipeline rank owns a different stage module:
+
+```text
+checkpoint_saved path=outputs/pusht_pp1_2pp/step_000025.pt
+checkpoint_saved_rank_shards pattern=step_000025_rank_*.pt
+checkpoint_saved path=outputs/pusht_pp1_2pp/step_000050.pt
+checkpoint_saved_rank_shards pattern=step_000050_rank_*.pt
+```
+
+The verified shard files were:
+
+```text
+outputs/pusht_pp1_2pp/step_000025_rank_000.pt 433M
+outputs/pusht_pp1_2pp/step_000025_rank_001.pt 433M
+outputs/pusht_pp1_2pp/step_000050_rank_000.pt 433M
+outputs/pusht_pp1_2pp/step_000050_rank_001.pt 433M
+```
+
+The resume config loaded each rank's local shard from `outputs/pusht_pp1_2pp/step_000050.pt` and continued training:
+
+```text
+checkpoint_resumed path=outputs/pusht_pp1_2pp/step_000050.pt step=50
+step=51 loss=0.734147
+step=52 loss=1.026340
+EXIT_CODE:0
+wandb: system/disk_used_percent 81.66815
+```
+
+Run commands:
+
+```bash
+cd /root/autodl-tmp/nanotron-smolvla-project
+bash scripts/run_pusht_pp1_2pp_autodl.sh configs/smolvla_pusht_pp1_2pp_50step_autodl.yaml
+bash scripts/run_pusht_pp1_2pp_autodl.sh configs/smolvla_pusht_pp1_2pp_50step_ckpt_autodl.yaml
+bash scripts/run_pusht_pp1_2pp_autodl.sh configs/smolvla_pusht_pp1_2pp_resume_autodl.yaml
 ```
