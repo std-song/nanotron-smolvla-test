@@ -200,19 +200,30 @@ The AutoDL environment had `wandb` installed, but `wandb status` showed `api_key
 
 ## Verified Stage D result
 
-2-way data parallel training was verified on a cloned AutoDL instance with two RTX 3090 GPUs, driver/CUDA compatible with `torch 2.11.0+cu130`. The run used `configs/smolvla_pusht_2dp_autodl.yaml` and `scripts/run_pusht_2dp_autodl.sh`.
+2-way data parallel training was verified on a cloned AutoDL instance with two RTX 3090 GPUs, driver/CUDA compatible with `torch 2.11.0+cu130`. The stable run used `configs/smolvla_pusht_2dp_autodl.yaml` and `scripts/run_pusht_2dp_autodl.sh`.
 
 ```text
 Nanotron-SmVLA training: data=lerobot dp=2, tp=1, pp=1, params=226,429,216, trainable=13,916,512
-step=1 loss=1.407345
-step=2 loss=1.466055
-step=3 loss=1.361035
-step=4 loss=1.488127
-step=5 loss=1.204177
+step=25 loss=1.031807
+checkpoint_saved path=outputs/pusht_2dp/step_000025.pt
+...
+step=50 loss=1.095483
+checkpoint_saved path=outputs/pusht_2dp/step_000050.pt
 wandb: Run summary:
-wandb: train/grad_norm 6.84375
-wandb: train/loss 1.20418
-wandb: train/samples_seen 10
+wandb: checkpoint/step 50
+wandb: train/grad_norm 6.75
+wandb: train/loss 1.09548
+wandb: train/samples_seen 100
 ```
 
+The resume config loaded the 2DP checkpoint and continued training:
+
+```text
+checkpoint_resumed path=outputs/pusht_2dp/step_000050.pt step=50
+step=51 loss=0.753152
+step=52 loss=1.073192
+wandb: train/samples_seen 104
+```
+
+Each 2DP checkpoint was about 486 MB. `/root/autodl-tmp` usage was 68% after the stable and resume runs.
 The DP path uses project-local gradient synchronization over trainable parameters only. Missing gradients are treated as zero, which avoids all-reducing frozen or conditionally unused SmolVLA parameters.
