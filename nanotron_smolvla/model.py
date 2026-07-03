@@ -177,6 +177,113 @@ def enable_expert_tensor_parallel(model: nn.Module, tp_pg) -> int:
         replaced += 1
     return replaced
 
+def run_vlm_with_expert_layer_range(
+    vlm_with_expert: nn.Module,
+    inputs_embeds: list[torch.Tensor | None],
+    attention_mask: torch.Tensor,
+    position_ids: torch.Tensor,
+    past_key_values=None,
+    use_cache: bool | None = False,
+    fill_kv_cache: bool | None = False,
+    layer_start: int = 0,
+    layer_end: int | None = None,
+    apply_final_norm: bool = True,
+):
+    """Run a contiguous SmolVLA VLM/expert layer range.
+
+    PP0 uses the full range, preserving LeRobot's current forward behavior. The
+    range arguments are the future PP stage boundary.
+    """
+
+    models = [vlm_with_expert.get_vlm_model().text_model, vlm_with_expert.lm_expert]
+    model_layers = vlm_with_expert.get_model_layers(models)
+    batch_size = None
+    for hidden_states in inputs_embeds:
+        if hidden_states is not None:
+            batch_size = hidden_states.shape[0]
+            break
+    if batch_size is None:
+        raise ValueError("At least one input embedding tensor is required")
+
+    num_layers = vlm_with_expert.num_vlm_layers
+    if layer_end is None:
+        layer_end = num_layers
+    if not 0 <= layer_start <= layer_end <= num_layers:
+        raise ValueError(f"Invalid layer range [{layer_start}, {layer_end}) for {num_layers} layers")
+
+    head_dim = vlm_with_expert.vlm.config.text_config.head_dim
+    for layer_idx in range(layer_start, layer_end):
+        if (
+            fill_kv_cache
+            or "cross" not in vlm_with_expert.attention_mode
+            or (
+                vlm_with_expert.self_attn_every_n_layers > 0
+                and layer_idx % vlm_with_expert.self_attn_every_n_layers == 0
+            )
+        ):
+            att_outputs, past_key_values = vlm_with_expert.forward_attn_layer(
+                model_layers,
+                inputs_embeds,
+                layer_idx,
+                position_ids,
+                attention_mask,
+                batch_size,
+                head_dim,
+                use_cache=use_cache,
+                fill_kv_cache=fill_kv_cache,
+                past_key_values=past_key_values,
+            )
+        else:
+            att_outputs, past_key_values = vlm_with_expert.forward_cross_attn_layer(
+                model_layers,
+                inputs_embeds,
+                layer_idx,
+                position_ids,
+                attention_mask,
+                batch_size,
+                head_dim,
+                use_cache=use_cache,
+                fill_kv_cache=fill_kv_cache,
+                past_key_values=past_key_values,
+            )
+
+        outputs_embeds = []
+        start = 0
+        for i, hidden_states in enumerate(inputs_embeds):
+            layer = model_layers[i][layer_idx]
+            att_output = att_outputs[i] if i < len(att_outputs) else att_outputs[0]
+            if hidden_states is None:
+                outputs_embeds.append(None)
+                continue
+            if layer is None:
+                outputs_embeds.append(hidden_states)
+                continue
+
+            end = start + hidden_states.shape[1]
+            if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
+                att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+            att_out = att_output[:, start:end]
+            out_emb = layer.self_attn.o_proj(att_out)
+            out_emb += hidden_states
+            after_first_residual = out_emb.clone()
+            out_emb = layer.post_attention_layernorm(out_emb)
+            out_emb = layer.mlp(out_emb)
+            out_emb += after_first_residual
+            outputs_embeds.append(out_emb)
+            start = end if len(att_outputs) == 1 else 0
+
+        inputs_embeds = outputs_embeds
+
+    if apply_final_norm:
+        outputs_embeds = []
+        for i, hidden_states in enumerate(inputs_embeds):
+            if hidden_states is not None:
+                outputs_embeds.append(models[i].norm(hidden_states))
+            else:
+                outputs_embeds.append(None)
+        inputs_embeds = outputs_embeds
+
+    return inputs_embeds, past_key_values
 
 class SmolVLALossModule(nn.Module):
     def __init__(self, config: SmolVLAModelConfig, parallel_context: ParallelContext | None = None):
@@ -184,7 +291,7 @@ class SmolVLALossModule(nn.Module):
 
         from lerobot.configs import FeatureType, PolicyFeature
         from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
-        from lerobot.policies.smolvla.modeling_smolvla import VLAFlowMatching
+        from lerobot.policies.smolvla.modeling_smolvla import VLAFlowMatching, make_att_2d_masks
         from lerobot.utils.constants import ACTION, OBS_STATE
 
         image_key = config.image_key or "observation.image"
@@ -218,6 +325,7 @@ class SmolVLALossModule(nn.Module):
             compile_model=config.compile_model,
         )
         smolvla_config.validate_features()
+        self._make_att_2d_masks = make_att_2d_masks
         self.model = VLAFlowMatching(smolvla_config)
         self.tp_replaced_linears = 0
         if config.expert_tensor_parallel:
@@ -226,6 +334,69 @@ class SmolVLALossModule(nn.Module):
             if not config.train_expert_only:
                 raise ValueError("expert_tensor_parallel currently requires train_expert_only=true")
             self.tp_replaced_linears = enable_expert_tensor_parallel(self.model, parallel_context.tp_pg)
+
+    def _sample_flow_inputs(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        noise = self.model.sample_noise(action.shape, action.device)
+        time = self.model.sample_time(action.shape[0], action.device)
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * action
+        u_t = noise - action
+        return x_t, u_t, time
+
+    def _embed_training_inputs(
+        self,
+        image: torch.Tensor,
+        image_mask: torch.Tensor,
+        language_tokens: torch.Tensor,
+        language_attention_mask: torch.Tensor,
+        state: torch.Tensor,
+        x_t: torch.Tensor,
+        time: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.model.embed_prefix(
+            [image], [image_mask], language_tokens, language_attention_mask, state=state
+        )
+        suffix_embs, suffix_pad_masks, suffix_att_masks = self.model.embed_suffix(x_t, time)
+        return prefix_embs, prefix_pad_masks, prefix_att_masks, suffix_embs, suffix_pad_masks, suffix_att_masks
+
+    def _build_attention_inputs(
+        self,
+        prefix_pad_masks: torch.Tensor,
+        prefix_att_masks: torch.Tensor,
+        suffix_pad_masks: torch.Tensor,
+        suffix_att_masks: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+        att_2d_masks = self._make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        return att_2d_masks, position_ids
+
+    def _run_backbone(
+        self,
+        prefix_embs: torch.Tensor,
+        suffix_embs: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        (_, suffix_out), _ = run_vlm_with_expert_layer_range(
+            self.model.vlm_with_expert,
+            inputs_embeds=[prefix_embs, suffix_embs],
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=None,
+            use_cache=False,
+            fill_kv_cache=False,
+            layer_start=0,
+            layer_end=None,
+            apply_final_norm=True,
+        )
+        return suffix_out[:, -self.model.config.chunk_size :]
+
+    def _compute_flow_loss(self, suffix_out: torch.Tensor, u_t: torch.Tensor) -> torch.Tensor:
+        suffix_out = suffix_out.to(dtype=torch.float32)
+        v_t = self.model.action_out_proj(suffix_out)
+        return F.mse_loss(u_t, v_t, reduction="none")
 
     def forward(
         self,
@@ -245,18 +416,34 @@ class SmolVLALossModule(nn.Module):
             dtype=model_dtype,
             enabled=model_dtype in (torch.float16, torch.bfloat16),
         ):
-            losses = self.model(
-                images=[image],
-                img_masks=[image_mask],
-                lang_tokens=language_tokens,
-                lang_masks=language_attention_mask,
-                state=state,
-                actions=action,
+            x_t, u_t, time = self._sample_flow_inputs(action)
+            (
+                prefix_embs,
+                prefix_pad_masks,
+                prefix_att_masks,
+                suffix_embs,
+                suffix_pad_masks,
+                suffix_att_masks,
+            ) = self._embed_training_inputs(
+                image,
+                image_mask,
+                language_tokens,
+                language_attention_mask,
+                state,
+                x_t,
+                time,
             )
+            attention_mask, position_ids = self._build_attention_inputs(
+                prefix_pad_masks,
+                prefix_att_masks,
+                suffix_pad_masks,
+                suffix_att_masks,
+            )
+            suffix_out = self._run_backbone(prefix_embs, suffix_embs, attention_mask, position_ids)
+            losses = self._compute_flow_loss(suffix_out, u_t)
         valid = (~action_is_pad).unsqueeze(-1)
         denom = (valid.sum() * losses.shape[-1]).clamp_min(1)
         return {"loss": ((losses * valid).sum() / denom).float()}
-
 
 class SmolVLANanotronModel(NanotronModel):
     def __init__(

@@ -9,6 +9,7 @@ This repository contains a minimal but structured bridge for training LeRobot Sm
 - Stage D: Verify 2-way data parallel training on one 2-GPU AutoDL instance.
 - Stage TP1: Verify expert-only 2-way tensor parallel training on one 2-GPU AutoDL instance.
 - Stage TP2: Verify combined 2DP x 2TP expert-only training on one 4-GPU AutoDL instance.
+- Stage PP0: Refactor SmolVLA training forward into pipeline-ready pieces while preserving pp=1 behavior.
 
 The active project code lives in `nanotron_smolvla/`.
 The original prototype is preserved under `archive/initial_smolvla_nanotron_smoke/` for historical reference only.
@@ -29,6 +30,8 @@ configs/
   smolvla_pusht_2tp_resume_autodl.yaml
   smolvla_pusht_2dp_2tp_autodl.yaml
   smolvla_pusht_2dp_2tp_resume_autodl.yaml
+  smolvla_pusht_pp0_1gpu_autodl.yaml
+  smolvla_pusht_pp0_2tp_autodl.yaml
 scripts/
   run_dummy_1gpu.sh
   run_pusht_1gpu_autodl.sh
@@ -352,4 +355,30 @@ step=51 loss=0.727421
 step=52 loss=1.068907
 wandb: train/samples_seen 104
 wandb: system/disk_used_percent 78.292
+```
+
+## Verified Stage PP0 result
+
+PP0 refactored the SmolVLA training path into pipeline-ready pieces while keeping a single Nanotron `PipelineBlock` and `pp=1`. The extracted helper `run_vlm_with_expert_layer_range(...)` currently runs the full layer range; PP1 can split that range across pipeline stages.
+
+The 1GPU PP0 smoke matched the previous single-GPU loss trace:
+
+```text
+Nanotron-SmVLA training: data=lerobot dp=1, tp=1, pp=1, params=226,429,216, trainable=13,916,512, expert_tp=False
+step=1 loss=1.369288
+step=2 loss=1.393214
+step=3 loss=1.315108
+step=4 loss=1.526516
+step=5 loss=1.235370
+```
+
+The 2TP PP0 smoke matched the previous expert-only 2TP loss trace:
+
+```text
+Nanotron-SmVLA training: data=lerobot dp=1, tp=2, pp=1, params=220,290,336, trainable=7,777,632, expert_tp=True
+step=1 loss=1.368408
+step=2 loss=1.368272
+step=3 loss=1.324518
+step=4 loss=1.532223
+step=5 loss=1.279573
 ```

@@ -77,7 +77,8 @@ A future cleanup can reduce checkpoint duplication by saving one shard per TP ra
 
 ## Stage PP0: pipeline split design
 
-Pipeline parallelism is not a config flip yet because `VLAFlowMatching.forward` builds prefix/suffix embeddings, calls all VLM/expert layers, and computes loss in one module.
+PP0 is implemented as a behavior-preserving refactor. SmolVLALossModule.forward now separates flow noise sampling, prefix/suffix embedding, attention input construction, VLM/expert layer execution, and flow loss.
+`run_vlm_with_expert_layer_range(...)` runs a contiguous layer range and currently covers the full range under `pp=1`.
 
 The likely PP split is:
 
@@ -85,6 +86,8 @@ The likely PP split is:
 - Stage 1: remaining VLM/expert layers, final norm, action projection, MSE loss
 
 For the current two-layer smoke model, PP has little benefit and mainly validates mechanics. A useful PP test probably needs a larger `num_vlm_layers`.
+
+PP0 was verified on AutoDL with both `dp=1,tp=1,pp=1` and `dp=1,tp=2,pp=1` smoke runs.
 
 ## Stage PP1: 2PP smoke
 
